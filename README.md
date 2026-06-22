@@ -1,105 +1,451 @@
-# LWP3-GT4-SDK (v4.9)
-### High-Performance robotic HAL for LEGO Porsche GT4 e-Performance
+# LWP3-GT4-SDK
 
-This library provides a high-performance Hardware Abstraction Layer (HAL) for the LEGO Technic Porsche GT4 (42176).
+High-performance Hardware Abstraction Layer (HAL) for the LEGO Technic Porsche GT4 e-Performance (42176).
 
-***
+The SDK provides deterministic BLE control, steering calibration, telemetry acquisition, and latency profiling for robotics and autonomous driving experiments.
 
-### Disclaimer
-*Porsche®, GT4®, and e-Performance™ are trademarks of Porsche AG. LEGO® is a trademark of the LEGO Group of companies. This project is not sponsored, authorized, or endorsed by the Porsche AG or LEGO Group. This SDK is an independent project developed for interoperability purposes under nominative fair use.*
+The goal of this project is to expose a stable and minimal hardware interface that higher-level software (ADAS, autonomy, perception, planning, racing logic) can build upon.
 
-***
+---
 
-## 🚀 Key Features
-- **Latency Tracking:** Real-time P50/P99 latency profiling.
-- **Lock-Free:** Atomic data latches for zero-contention state access.
-- **Deterministic Timing**: Uses `CLOCK_MONOTONIC_RAW` for all profiling.
-- **Non-Blocking Logic**: TX thread uses a rate-gate instead of sleep_for, maximizing responsiveness.
-- **Epsilon Matching**: Latency is only recorded when the mechanical rack physically reaches the target threshold (ϵ=3.0∘).
+## Disclaimer
 
-## Performance Specs (Verified v7.0)
+Porsche®, GT4®, and e-Performance™ are trademarks of Porsche AG.
 
-The following metrics were captured during the final release profile:
-- **Mean System Latency**: 93.53 ms (Total mechanical response time).
-- **Control Frequency**: 50 Hz (20 ms nominal cycles).
-- **Jitter (P99)**: 258 ms (Accounts for mechanical settling and gear lash).
+LEGO® is a trademark of the LEGO Group.
 
-## Architecture: Two-Packet Synchronized Dispatch
+This project is not affiliated with, sponsored by, authorized by, or endorsed by Porsche AG or the LEGO Group.
 
-To bypass the limitations of the Move Hub firmware and ensure D-Bus stability, the HAL uses a dual-packet architecture:
-- **Virtual Port (0x61)**: Dynamically bonds physical Ports 50 (L) and 51 (R) for hardware-level drive synchronization.
-- **Physical Port 52**: Independent absolute position control for high-precision steering.
+---
 
-## 📦 Installation
-**Prerequisites:**
-- Ubuntu 22.04+ (or any Linux with BlueZ 5.50+)
-- `libsimpleble-dev`
-- C++20 compatible compiler
+# Design Philosophy
 
-```bash
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
+This library is intentionally a HAL.
+
+It is responsible only for:
+
+- BLE communication
+- LWP3 protocol handling
+- Steering calibration
+- Steering control
+- Drive control
+- Telemetry acquisition
+- Latency measurement
+
+It is NOT responsible for:
+
+- Path planning
+- Lane keeping
+- Obstacle avoidance
+- PID control
+- State estimation
+- Sensor fusion
+- Autonomous driving logic
+
+Those belong in higher software layers.
+
+---
+
+# Architecture
+
+The SDK uses a dedicated transmission thread and lock-free state latches.
+
+```text
+Application
+    ↓
+sendCommand()
+    ↓
+Latest-Wins Command Latch
+    ↓
+TX Thread
+    ↓
+BLE / LWP3
+    ↓
+LEGO Move Hub
+    ↓
+Telemetry Callback
+    ↓
+Telemetry Latch
+    ↓
+getLatestTelemetry()
 ```
 
-## 💻 API Usage
+The application owns the control loop.
 
-The SDK follows a Pulse & Poll pattern. Your application owns the control loop (e.g., 50Hz) and the HAL handles the hardware communication.
+Typical control frequency:
 
-### Slalom Example  
-**Note**: Press the Hub button just before start
+- 50 Hz (20 ms)
 
-```C++
+---
 
-#include <cmath>
-#include <iostream>
+# Features
+
+## Steering Calibration
+
+Automatic discovery of steering limits.
+
+Calibration sequence:
+
+1. Capture current steering position
+2. Sweep left until physical stop
+3. Return toward initial position
+4. Sweep right until physical stop
+5. Compute true center
+6. Move steering to center
+
+Soft steering limits are automatically derived from the measured hardware limits.
+
+Calibration is mandatory before vehicle operation.
+
+---
+
+## Deterministic Control
+
+Commands are sent through a dedicated TX thread.
+
+The HAL implements:
+
+- Latest-wins command semantics
+- Non-blocking command submission
+- Thread-safe operation
+
+If multiple commands are issued rapidly, only the most recent command is transmitted.
+
+---
+
+## Telemetry
+
+The HAL continuously tracks steering position.
+
+Telemetry contains:
+
+```cpp
+struct Telemetry {
+    int32_t steer_pos;
+    TimestampNs timestamp_ns;
+};
+```
+
+Values are available through a lock-free latch.
+
+---
+
+## Latency Profiling
+
+The SDK measures physical steering response.
+
+Latency is not measured when a packet is transmitted.
+
+Latency is measured when the steering rack physically reaches the requested target.
+
+This produces a realistic control-system latency measurement that includes:
+
+- BLE transport
+- Hub processing
+- Motor response
+- Gear train backlash
+- Mechanical settling
+
+Returned statistics:
+
+```cpp
+struct LatencyStats {
+    float mean_ms;
+    float p50_ms;
+    float p99_ms;
+};
+```
+
+---
+
+# Public API
+
+## Command
+
+```cpp
+struct Command {
+    int32_t steer;
+    int32_t throttle;
+};
+```
+
+Ranges:
+
+- steer: approximately -100 to +100
+- throttle: -100 to +100
+
+---
+
+## connect()
+
+```cpp
+bool connect(std::string_view address);
+```
+
+Connects to the LEGO Move Hub and performs protocol initialization.
+
+Returns:
+
+- true on success
+- false on failure
+
+---
+
+## disconnect()
+
+```cpp
+void disconnect();
+```
+
+Stops background processing and disconnects from the hub.
+
+---
+
+## autoCalibrate()
+
+```cpp
+bool autoCalibrate();
+```
+
+Performs steering calibration.
+
+This must be called before vehicle operation.
+
+Returns:
+
+- true on success
+- false on failure
+
+---
+
+## sendCommand()
+
+```cpp
+void sendCommand(const Command& cmd);
+```
+
+Thread-safe and non-blocking.
+
+Example:
+
+```cpp
+car.sendCommand({25, 40});
+```
+
+Meaning:
+
+- steering = 25
+- throttle = 40
+
+---
+
+## getLatestTelemetry()
+
+```cpp
+Telemetry getLatestTelemetry() const;
+```
+
+Returns the latest steering telemetry.
+
+Example:
+
+```cpp
+auto t = car.getLatestTelemetry();
+
+std::cout << t.steer_pos << std::endl;
+```
+
+---
+
+## getLatencyStats()
+
+```cpp
+LatencyStats getLatencyStats();
+```
+
+Returns accumulated latency statistics.
+
+Example:
+
+```cpp
+auto stats = car.getLatencyStats();
+
+std::cout << stats.mean_ms << std::endl;
+```
+
+---
+
+## isReady()
+
+```cpp
+bool isReady() const;
+```
+
+Returns true when the vehicle is ready for operation.
+
+Requirements:
+
+- successful BLE connection
+- successful initialization
+- successful calibration
+
+---
+
+# Quick Start
+
+```cpp
+#include "Lwp3Gt4.hpp"
+
+#include <chrono>
 #include <thread>
 
-#include "Lwp3Gt4.hpp"
+using namespace std::chrono_literals;
 
 int main() {
     LWP3::PorscheGt4 car;
-    // Put your Lego Hub MAC here
+
     if (!car.connect("28:3C:90:9C:82:14")) {
         return 1;
     }
 
-    std::cout << "Calibrating..." << std::endl;
-    // Calibration is mandatory
-    car.autoCalibrate();
-
-    // Final check for the Virtual Port before slalom
-    if (!car.isReady()) {
-        std::cerr << "Hub failed to initialize virtual drive port!" << std::endl;
+    if (!car.autoCalibrate()) {
         return 1;
     }
 
-    std::cout << "Starting Slalom..." << std::endl;
-    for (int i = 0; i < 400; ++i) {
-        float t = i * 0.02f;
-        int32_t steer = static_cast<int32_t>(45.0f * std::sin(t * 3.5f));
+    if (!car.isReady()) {
+        return 1;
+    }
 
-        car.sendCommand({steer, 35});
+    for (int i = 0; i < 250; ++i) {
+        car.sendCommand({0, 30});
         std::this_thread::sleep_for(20ms);
     }
 
     car.sendCommand({0, 0});
-    std::this_thread::sleep_for(500ms);
+
     car.disconnect();
+
     return 0;
 }
 ```
 
-## ⚙️ Calibration Logic
+---
 
-The SDK performs a 5-step robust calibration to protect the steering servo:  
-`Capture Initial -> Sweep Left -> Return Initial -> Sweep Right -> Return Zero.`  
-Soft margins are automatically calculated to stop steering 4 units before physical contact with the chassis.
+# Recommended Application Structure
 
-## License
+The SDK is intended to be used inside a fixed-frequency control loop.
 
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+Example:
+
+```text
+50 Hz loop
+
+read telemetry
+      ↓
+estimate state
+      ↓
+compute command
+      ↓
+sendCommand()
+```
+
+A typical autonomy stack built on top of the HAL:
+
+```text
+Camera
+   ↓
+Perception
+   ↓
+State Estimator
+   ↓
+Planner
+   ↓
+Controller
+   ↓
+LWP3-GT4-SDK
+   ↓
+Vehicle
+```
 
 ---
 
-*Author: lsuciu70* *Version: 7.0.0 "The Mechanical Truth"*
+# Performance
+
+Measured on the development platform.
+
+Observed steering response:
+
+- Mean latency: ~94 ms
+- Median latency (P50): ~71 ms
+- Worst-case latency (P99): ~258 ms
+
+These values represent physical steering response and not merely BLE packet transmission time.
+
+---
+
+# Limitations
+
+## Steering telemetry only
+
+The HAL currently exposes steering position telemetry.
+
+It does not expose:
+
+- wheel speed
+- vehicle velocity
+- IMU data
+- battery data
+
+unless future versions add those capabilities.
+
+---
+
+## Calibration required
+
+Steering commands are not meaningful until calibration has completed.
+
+Always run:
+
+```cpp
+car.autoCalibrate();
+```
+
+after connecting.
+
+---
+
+## BLE transport
+
+The system depends on:
+
+- BlueZ
+- SimpleBLE
+- Linux BLE stack behavior
+
+Latency and reliability may vary between adapters and operating systems.
+
+---
+
+## Not a safety system
+
+This project is experimental robotics software.
+
+Do not use it in any application where malfunction could cause injury or property damage.
+
+---
+
+# Intended Use
+
+This HAL is designed as the foundation layer for:
+
+- ADAS experiments
+- Autonomous LEGO vehicles
+- Robotics research
+- Control-system development
+- State-estimation research
+- Latency-compensation research
+- Path-planning experiments
+
+The SDK provides hardware access.
+
+Autonomy lives above it.
