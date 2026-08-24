@@ -199,6 +199,11 @@ void disconnect();
 
 Stops background processing and disconnects from the hub.
 
+Also clears calibration state (hardware center, virtual drive port,
+telemetry). A subsequent `connect()` always requires a fresh
+`autoCalibrate()` before `isReady()` becomes true again, even when
+reconnecting to the same vehicle.
+
 ---
 
 ## autoCalibrate()
@@ -288,6 +293,9 @@ Requirements:
 - successful BLE connection
 - successful initialization
 - successful calibration
+
+Becomes false again after `disconnect()`, and stays false after a
+reconnect until `autoCalibrate()` succeeds on the new connection.
 
 ---
 

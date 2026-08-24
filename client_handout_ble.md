@@ -198,6 +198,37 @@ Clients should refuse vehicle operation until ready.
 
 ---
 
+# 8a. Reconnecting
+
+`disconnect()` clears all session state:
+
+- calibration status
+- hardware center
+- virtual drive port
+- telemetry
+
+This means calibration does NOT carry over across a disconnect/connect
+cycle, even if it is the same physical vehicle.
+
+```text
+connect()
+autoCalibrate()
+isReady()          -> true
+disconnect()
+connect()
+isReady()          -> false   (calibration state was reset)
+autoCalibrate()    -> required again
+isReady()          -> true
+```
+
+Clients must call `autoCalibrate()` again after every `connect()`,
+including reconnects, before relying on `isReady()`.
+
+This is intentional: the physical rig or the hub may have changed between
+sessions, so a stale calibration must never be reused silently.
+
+---
+
 # 9. Command Interface
 
 ## Command Structure
@@ -620,6 +651,35 @@ Actual meaning:
 
 ```text
 Latency == physical steering response time
+```
+
+---
+
+## Mistake 5
+
+Assuming calibration persists across a disconnect/connect cycle.
+
+Wrong:
+
+```cpp
+car.connect(address);
+car.autoCalibrate();
+car.disconnect();
+...
+car.connect(address);
+car.sendCommand(...);   // isReady() is false here
+```
+
+Correct:
+
+```cpp
+car.connect(address);
+car.autoCalibrate();
+car.disconnect();
+...
+car.connect(address);
+car.autoCalibrate();    // required again, see section 8a
+car.sendCommand(...);
 ```
 
 ---
