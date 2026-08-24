@@ -130,6 +130,43 @@ Values are available through an atomic latch (lock-free on platforms/builds wher
 
 ---
 
+## IMU (Accelerometer / Gyroscope)
+
+The Move Hub has an internal 3-axis accelerometer and 3-axis gyroscope. The
+HAL exposes both as raw samples:
+
+```cpp
+struct ImuSample {
+    int16_t x;
+    int16_t y;
+    int16_t z;
+    TimestampNs timestamp_ns;
+};
+```
+
+Values are the hub's native raw units — the HAL does not scale, filter, or
+map axes to the chassis. That interpretation belongs in the application
+layer, consistent with the HAL's zero-control-policy design.
+
+---
+
+## Link Status (RSSI)
+
+The hub reports its own BLE signal strength:
+
+```cpp
+struct LinkStatus {
+    int8_t rssi_dbm;
+    TimestampNs timestamp_ns;
+};
+```
+
+Intended use: let the application layer detect a degrading link (falling
+RSSI, or a stale `timestamp_ns`) and stop the vehicle proactively, before
+the BLE connection actually drops.
+
+---
+
 ## Latency Profiling
 
 The SDK measures physical steering response.
@@ -258,6 +295,44 @@ Example:
 auto t = car.getLatestTelemetry();
 
 std::cout << t.steer_pos << std::endl;
+```
+
+---
+
+## getAccel() / getGyro()
+
+```cpp
+ImuSample getAccel() const;
+ImuSample getGyro() const;
+```
+
+Return the latest raw sample from the hub's internal accelerometer /
+gyroscope.
+
+Example:
+
+```cpp
+auto a = car.getAccel();
+
+std::cout << a.x << " " << a.y << " " << a.z << std::endl;
+```
+
+---
+
+## getLinkStatus()
+
+```cpp
+LinkStatus getLinkStatus() const;
+```
+
+Returns the latest BLE RSSI reported by the hub.
+
+Example:
+
+```cpp
+auto link = car.getLinkStatus();
+
+std::cout << (int)link.rssi_dbm << " dBm" << std::endl;
 ```
 
 ---
@@ -393,15 +468,15 @@ These values represent physical steering response and not merely BLE packet tran
 
 # Limitations
 
-## Steering telemetry only
+## No wheel/vehicle-speed telemetry
 
-The HAL currently exposes steering position telemetry.
+The HAL exposes steering position, raw accelerometer/gyroscope samples from
+the hub's internal IMU, and BLE link RSSI.
 
 It does not expose:
 
 - wheel speed
 - vehicle velocity
-- IMU data
 - battery data
 
 unless future versions add those capabilities.

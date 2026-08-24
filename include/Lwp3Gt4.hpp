@@ -40,6 +40,26 @@ struct Telemetry {
 };
 
 /**
+ * @brief Raw 3-axis reading from the Move Hub's internal accelerometer or gyroscope.
+ * Units are the hub's native raw units (uncalibrated) — scale/axis mapping is left
+ * to the application layer, consistent with the HAL's zero-control-policy design.
+ */
+struct ImuSample {
+    int16_t x;
+    int16_t y;
+    int16_t z;
+    TimestampNs timestamp_ns;  ///< Monotonic timestamp of ingestion.
+};
+
+/**
+ * @brief BLE link quality snapshot, from the hub's own RSSI property.
+ */
+struct LinkStatus {
+    int8_t rssi_dbm;           ///< Received Signal Strength Indicator, in dBm (negative).
+    TimestampNs timestamp_ns;  ///< Monotonic timestamp of ingestion.
+};
+
+/**
  * @brief High-fidelity latency metrics for ADAS estimation.
  */
 struct LatencyStats {
@@ -94,6 +114,22 @@ class PorscheGt4 {
     Telemetry getLatestTelemetry() const noexcept;
 
     /**
+     * @brief Retrieves the latest raw accelerometer sample from the hub's internal IMU.
+     */
+    ImuSample getAccel() const noexcept;
+
+    /**
+     * @brief Retrieves the latest raw gyroscope sample from the hub's internal IMU.
+     */
+    ImuSample getGyro() const noexcept;
+
+    /**
+     * @brief Retrieves the latest BLE link status (RSSI), reported by the hub itself.
+     * Intended for the application layer to detect a degrading link before it drops.
+     */
+    LinkStatus getLinkStatus() const noexcept;
+
+    /**
      * @brief Calculates real-time latency statistics using Epsilon-Matching.
      * This provides a model of physical system response, not just transport time.
      * @return Statistical report of system lag.
@@ -119,6 +155,9 @@ class PorscheGt4 {
     std::atomic<Command> _latestCmd{Command{0, 0}};
     std::atomic<bool> _hasNewCmd{false};
     std::atomic<Telemetry> _telemetryLatch{Telemetry{}};
+    std::atomic<ImuSample> _accelLatch{ImuSample{}};
+    std::atomic<ImuSample> _gyroLatch{ImuSample{}};
+    std::atomic<LinkStatus> _linkStatus{LinkStatus{}};
 
     // Internal Telemetry State
     std::atomic<int32_t> _rawSteerPos{0};

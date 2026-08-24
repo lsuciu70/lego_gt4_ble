@@ -23,6 +23,8 @@ The SDK provides:
 - Steering commands
 - Drive commands
 - Steering telemetry
+- Raw IMU telemetry (accelerometer + gyroscope, from the hub's internal sensors)
+- BLE link status (RSSI)
 - Physical latency measurements
 
 The SDK does NOT provide:
@@ -433,6 +435,70 @@ sample4
 ```
 
 The newest sample always replaces older samples.
+
+---
+
+# 14a. IMU and Link Status Interfaces
+
+## getAccel() / getGyro()
+
+```cpp
+ImuSample getAccel() const;
+ImuSample getGyro() const;
+```
+
+```cpp
+struct ImuSample
+{
+    int16_t x;
+    int16_t y;
+    int16_t z;
+    TimestampNs timestamp_ns;
+};
+```
+
+Source:
+
+The Move Hub has an internal 3-axis accelerometer and 3-axis gyroscope.
+The SDK subscribes to both and exposes the raw samples.
+
+Units:
+
+Raw, hub-native units. The SDK does NOT scale to g / deg-per-second, and
+does NOT remap axes to the vehicle chassis. Calibration and interpretation
+are the client's responsibility, same as with steering telemetry.
+
+Semantics:
+
+Same latest-only semantics as `Telemetry` (see sections 13-14): no
+history, no queue, newest sample always wins.
+
+---
+
+## getLinkStatus()
+
+```cpp
+LinkStatus getLinkStatus() const;
+```
+
+```cpp
+struct LinkStatus
+{
+    int8_t rssi_dbm;
+    TimestampNs timestamp_ns;
+};
+```
+
+Source:
+
+The hub's own RSSI property (LWP3 Hub Properties, continuous updates).
+
+Intended use:
+
+Detect a degrading BLE link (falling RSSI, or `timestamp_ns` not advancing)
+and stop the vehicle proactively, before the connection actually drops.
+The SDK does not do this automatically — no hidden control policy, same
+design principle as everywhere else in this document.
 
 ---
 

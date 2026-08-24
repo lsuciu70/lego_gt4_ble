@@ -67,6 +67,26 @@ void PorscheGt4::setupHandshake() {
             std::memcpy(&val, &raw[4], sizeof(int32_t));
             updateTelemetry(val, getNowNs());
         }
+        if (data.size() >= 10 && raw[2] == 0x45 && raw[3] == PORT_ACCEL) {
+            ImuSample s;
+            std::memcpy(&s.x, &raw[4], sizeof(int16_t));
+            std::memcpy(&s.y, &raw[6], sizeof(int16_t));
+            std::memcpy(&s.z, &raw[8], sizeof(int16_t));
+            s.timestamp_ns = getNowNs();
+            _accelLatch.store(s);
+        }
+        if (data.size() >= 10 && raw[2] == 0x45 && raw[3] == PORT_GYRO) {
+            ImuSample s;
+            std::memcpy(&s.x, &raw[4], sizeof(int16_t));
+            std::memcpy(&s.y, &raw[6], sizeof(int16_t));
+            std::memcpy(&s.z, &raw[8], sizeof(int16_t));
+            s.timestamp_ns = getNowNs();
+            _gyroLatch.store(s);
+        }
+        if (data.size() >= 6 && raw[2] == 0x01 && raw[3] == HUB_PROP_RSSI &&
+            raw[4] == HUB_PROP_OP_UPDATE) {
+            _linkStatus.store({static_cast<int8_t>(raw[5]), getNowNs()});
+        }
         if (data.size() >= 5 && raw[2] == 0x04 && raw[4] == 0x02) {
             _virtualDrivePort.store(raw[3]);
         }
@@ -75,6 +95,15 @@ void PorscheGt4::setupHandshake() {
     porsche.write_command(SERVICE_UUID, CHAR_UUID,
                           {0x0A, 0x00, 0x41, PORT_STEER, 0x02, 0x01, 0x00, 0x00, 0x00, 0x01});
     std::this_thread::sleep_for(200ms);
+    porsche.write_command(SERVICE_UUID, CHAR_UUID,
+                          {0x0A, 0x00, 0x41, PORT_ACCEL, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01});
+    std::this_thread::sleep_for(150ms);
+    porsche.write_command(SERVICE_UUID, CHAR_UUID,
+                          {0x0A, 0x00, 0x41, PORT_GYRO, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01});
+    std::this_thread::sleep_for(150ms);
+    porsche.write_command(SERVICE_UUID, CHAR_UUID,
+                          {0x05, 0x00, 0x01, HUB_PROP_RSSI, HUB_PROP_OP_ENABLE_UPDATES});
+    std::this_thread::sleep_for(150ms);
     porsche.write_command(SERVICE_UUID, CHAR_UUID, {0x06, 0x00, 0x61, 0x01, 0x32, 0x33});
     for (int i = 0; i < 20 && _virtualDrivePort.load() == 0xFF; ++i)
         std::this_thread::sleep_for(100ms);
@@ -217,6 +246,15 @@ void PorscheGt4::sendReliable(const SimpleBLE::ByteArray& data) {
 
 Telemetry PorscheGt4::getLatestTelemetry() const noexcept {
     return _telemetryLatch.load();
+}
+ImuSample PorscheGt4::getAccel() const noexcept {
+    return _accelLatch.load();
+}
+ImuSample PorscheGt4::getGyro() const noexcept {
+    return _gyroLatch.load();
+}
+LinkStatus PorscheGt4::getLinkStatus() const noexcept {
+    return _linkStatus.load();
 }
 bool PorscheGt4::isReady() const noexcept {
     return _isCalibrated.load() && _virtualDrivePort.load() != 0xFF;
