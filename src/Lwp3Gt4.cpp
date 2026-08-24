@@ -60,6 +60,8 @@ bool PorscheGt4::connect(std::string_view address) {
     }
 
     _running = true;
+    _connected.store(true);
+    _txLoopExited.store(false);
     _txThread = std::jthread([this](std::stop_token st) { txLoop(st); });
     return true;
 }
@@ -138,7 +140,7 @@ void PorscheGt4::txLoop(std::stop_token st) {
     while (!st.stop_requested()) {
         std::unique_lock lock(_txMtx);
         _txCv.wait_for(lock, 100ms, [&] { return _hasNewCmd.load() || st.stop_requested(); });
-        if (st.stop_requested()) return;
+        if (st.stop_requested()) break;
 
         TimestampNs now = getNowNs();
         Command target = _latestCmd.load();
@@ -205,6 +207,15 @@ void PorscheGt4::txLoop(std::stop_token st) {
             std::cerr << "[txLoop] write_command threw non-std exception\n" << std::flush;
         }
     }
+
+    // Signal actual exit, independent of stop_token — disconnect() waits on
+    // this (bounded) rather than joining blind, since an in-flight
+    // write_command() above can block indefinitely on a stuck D-Bus call.
+    {
+        std::lock_guard<std::mutex> exitLock(_txExitMtx);
+        _txLoopExited.store(true);
+    }
+    _txExitCv.notify_all();
 }
 
 void PorscheGt4::updateTelemetry(int32_t pos, TimestampNs now) {
@@ -427,19 +438,59 @@ bool PorscheGt4::isReady() const noexcept {
     return _isCalibrated.load() && _virtualDrivePort.load() != 0xFF;
 }
 void PorscheGt4::disconnect() {
+    // Idempotent: a second call (e.g. the destructor calling disconnect()
+    // again after the application already called it explicitly) is a cheap
+    // no-op instead of repeating a slow porsche.disconnect() call for
+    // nothing. Measured on hardware: porsche.disconnect() alone can take
+    // ~2-3s even on a clean connection (BlueZ/D-Bus, not our code); paying
+    // that twice for the same disconnect is pure waste.
+    if (!_connected.exchange(false)) return;
+
     _running = false;
+    bool txThreadStuck = false;
 
     // Stop and join the TX thread before touching `porsche`, so the background
     // thread can't race with disconnect()/a subsequent connect() re-assigning it.
     if (_txThread.joinable()) {
         _txThread.request_stop();
         _txCv.notify_one();
-        _txThread.join();
+
+        // join() has no timeout, and an in-flight write_command() inside
+        // txLoop() can block indefinitely on a stuck D-Bus/BlueZ call
+        // (observed on hardware, not caused by our TX logic). Wait for
+        // txLoop's own exit signal — independent of stop_token — with a
+        // bounded timeout instead of joining blind.
+        std::unique_lock<std::mutex> exitLock(_txExitMtx);
+        bool exited = _txExitCv.wait_for(exitLock, 3s, [this] { return _txLoopExited.load(); });
+        exitLock.unlock();
+
+        if (exited) {
+            _txThread.join();
+        } else {
+            // Presumed stuck inside a blocking write_command(). Detach
+            // rather than hang disconnect() forever: std::jthread::detach()
+            // (not a raw pthread_detach) so the jthread object's own state
+            // is updated and a later connect()/destructor won't try to
+            // join it again. The OS thread keeps running and still
+            // touches `porsche`/`this` if it ever unblocks — an accepted
+            // residual risk given the alternative is an indefinite hang.
+            // See client_handout_ble.md for the full rationale.
+            std::cerr << "[disconnect] TX thread did not exit within timeout; detaching.\n"
+                      << std::flush;
+            _txThread.detach();
+            txThreadStuck = true;
+        }
     }
 
-    try {
-        porsche.disconnect();
-    } catch (...) {
+    // Skip porsche.disconnect() if the TX thread is presumed stuck: calling
+    // it concurrently from this thread while the detached one may still be
+    // mid-call on the same SimpleBLE::Peripheral object would be a new,
+    // unrelated hazard on top of the already-accepted risk above.
+    if (!txThreadStuck) {
+        try {
+            porsche.disconnect();
+        } catch (...) {
+        }
     }
 
     // A fresh connect() always requires a fresh calibration: the physical

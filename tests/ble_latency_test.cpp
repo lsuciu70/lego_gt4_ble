@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <thread>
@@ -36,5 +37,10 @@ int main(int argc, char** argv) {
     std::cout << "---------------------------------\n";
 
     car.disconnect();
-    return 0;
+
+    // std::_Exit(0), not return 0: measured on hardware, normal static
+    // teardown after disconnect() can add 25+ seconds (SimpleBLE/BlueZ
+    // process-exit delay, unrelated to this SDK). See README.md "Known
+    // Issue: Slow Process Exit".
+    std::_Exit(0);
 }

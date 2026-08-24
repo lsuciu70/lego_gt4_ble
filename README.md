@@ -423,6 +423,15 @@ telemetry). A subsequent `connect()` always requires a fresh
 `autoCalibrate()` before `isReady()` becomes true again, even when
 reconnecting to the same vehicle.
 
+Idempotent — a second call (e.g. the destructor calling it again after the
+application already called it explicitly) is a cheap no-op.
+
+Internally, stopping the TX thread waits up to 3s for it to exit cleanly;
+if it doesn't (an in-flight `write_command()` stuck on a bad D-Bus/BlueZ
+call), the thread is detached rather than hanging `disconnect()` forever.
+This is a different issue from the slow *process exit* after a clean
+`disconnect()` — see "Known Issue: Slow Process Exit" above.
+
 ---
 
 ## autoCalibrate()
@@ -764,6 +773,35 @@ The system depends on:
 - Linux BLE stack behavior
 
 Latency and reliability may vary between adapters and operating systems.
+
+---
+
+## Known Issue: Slow Process Exit
+
+`disconnect()` itself returns promptly (a few seconds at most — measured
+`porsche.disconnect()` alone taking ~2-3s on this hardware, which is
+BlueZ/D-Bus overhead, not something this HAL adds). But letting the
+process exit normally afterward (falling off the end of `main()`, so
+`PorscheGt4`'s destructor and the C++ runtime's static teardown both run)
+was measured on hardware to add **25+ seconds** on top of that, with no
+further output or activity — almost certainly a SimpleBLE-internal
+background thread not being torn down cleanly at process exit. This is
+unrelated to anything in this HAL's own code (confirmed by instrumenting
+every step of `disconnect()` itself: all of it completes in a few seconds,
+well before the hang starts).
+
+**Workaround, used in every example/test in this repo:** call
+`std::_Exit(0)` (from `<cstdlib>`) immediately after `disconnect()`
+returns, instead of `return 0` / falling off `main()`. This skips local
+destructors and the C++ runtime's static teardown entirely and terminates
+the process immediately — safe here because `disconnect()` has already
+released everything that matters (the TX thread and the BLE connection);
+nothing meaningful is left to clean up.
+
+Note this is a different mechanism from the TX-thread detach fallback in
+`disconnect()` (see "disconnect()" in the API reference) — that one
+handles a stuck `write_command()` mid-drive; this one handles a slow
+exit path after a completely successful, clean disconnect.
 
 ---
 

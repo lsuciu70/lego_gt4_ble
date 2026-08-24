@@ -31,3 +31,6 @@ target_link_libraries(ble_latency_test lwp3gt4)
 
 add_executable(async_test tests/async_test.cpp)
 target_link_libraries(async_test lwp3gt4)
+
+add_executable(drive_telemetry_test tests/drive_telemetry_test.cpp)
+target_link_libraries(drive_telemetry_test lwp3gt4)

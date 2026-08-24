@@ -240,6 +240,54 @@ including reconnects, before relying on `isReady()`.
 This is intentional: the physical rig or the hub may have changed between
 sessions, so a stale calibration must never be reused silently.
 
+`disconnect()` is idempotent — calling it twice (e.g. explicitly, then
+again from `~PorscheGt4()`) is a cheap no-op the second time, not a
+repeated slow teardown.
+
+Internally, `disconnect()` stops the TX thread with a bounded (3s) wait
+rather than an unconditional `join()`: an in-flight `write_command()` can
+block indefinitely on a stuck D-Bus/BlueZ call (observed on hardware), and
+without a timeout that would hang `disconnect()` itself forever. If the
+thread doesn't exit in time, it's detached (via `std::jthread::detach()`,
+not a raw `pthread_detach`, so the jthread object's own bookkeeping stays
+consistent) and abandoned rather than blocking. The detached thread keeps
+running and could still touch `this`/`porsche` if it ever unblocks — an
+accepted residual risk given the alternative is an indefinite hang. This
+is a genuinely rare path (only hit once, under already-degraded BlueZ
+conditions, during this SDK's testing); the far more common slow-exit
+issue is covered next.
+
+---
+
+# 8b. Known Issue: Slow Process Exit
+
+`disconnect()` itself returns in a few seconds at most (`porsche.disconnect()`
+alone measured at ~2-3s on this hardware — BlueZ/D-Bus overhead, not
+something this HAL adds). But letting the process exit normally
+afterward — falling off the end of `main()`, so `PorscheGt4`'s destructor
+and the C++ runtime's static teardown both run — was measured to add
+**25+ seconds** on top of that, with no further activity. Every step
+inside `disconnect()` was individually timestamped to confirm this: all of
+it completes in a few seconds, well before the hang starts. The remaining
+delay is almost certainly a SimpleBLE-internal background thread not
+being torn down cleanly at process exit — outside this HAL's control.
+
+**Workaround, used in every example/test in this repo:**
+
+```cpp
+car.disconnect();
+std::_Exit(0);   // instead of `return 0;` — see explanation below
+```
+
+`std::_Exit(0)` (from `<cstdlib>`) terminates the process immediately,
+skipping local destructors and the C++ runtime's static teardown
+entirely. This is safe here because `disconnect()` has already released
+everything that matters (TX thread, BLE connection) — there is nothing
+meaningful left to clean up. Clients embedding this SDK in a longer-lived
+application (not a short test/example process) should be aware that a
+clean shutdown may take significantly longer than `disconnect()` itself
+suggests, if they don't use this workaround.
+
 ---
 
 # 9. Command Interface

@@ -112,6 +112,11 @@ class PorscheGt4 {
 
     /**
      * @brief Disconnects the peripheral and stops the background TX thread.
+     * Idempotent — a redundant second call (e.g. from the destructor after
+     * an explicit call) is a cheap no-op. Note: letting the *process* exit
+     * normally afterward (not calling std::_Exit()) can add 25+ seconds of
+     * unrelated SimpleBLE-internal teardown delay — see README.md "Known
+     * Issue: Slow Process Exit".
      */
     void disconnect();
 
@@ -214,8 +219,19 @@ class PorscheGt4 {
     std::jthread _txThread;
     std::atomic<bool> _running{false};
     std::atomic<bool> _isCalibrated{false};
+    // Guards disconnect() against a redundant second call (e.g. explicit
+    // call followed by the destructor's own disconnect()) — see disconnect().
+    std::atomic<bool> _connected{false};
     std::condition_variable _txCv;
     std::mutex _txMtx;
+
+    // Separate exit signal for disconnect()'s bounded join (see disconnect()):
+    // txLoop() sets this and notifies right before it actually returns,
+    // independent of stop_token, so disconnect() can distinguish "the
+    // thread really exited" from "we asked it to and hope it did."
+    std::condition_variable _txExitCv;
+    std::mutex _txExitMtx;
+    std::atomic<bool> _txLoopExited{false};
 
     // Control State (Atomic Latest Semantics)
     std::atomic<Command> _latestCmd{Command{0, 0, 0}};
