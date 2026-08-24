@@ -152,9 +152,16 @@ LatencyStats PorscheGt4::getLatencyStats() {
 }
 
 SimpleBLE::ByteArray PorscheGt4::buildDriveCmd(int8_t speed) {
-    std::array<uint8_t, 8> buf = {0x08, 0x00, 0x81, _virtualDrivePort.load(),
-                                  0x11, 0x51, 0x00, static_cast<uint8_t>(speed)};
-    return SimpleBLE::ByteArray(reinterpret_cast<const char*>(buf.data()), 8);
+    // Subcommand 0x02: Start Speed for virtual port (Speed1, Speed2, MaxPower).
+    // PORT_DRIVE_L (0x32) is mounted mirror-image to PORT_DRIVE_R (0x33), so
+    // Speed1 (left) must be negated for both wheels to drive in the same direction.
+    int8_t inv = static_cast<int8_t>(-speed);
+    std::array<uint8_t, 9> buf = {0x09, 0x00, 0x81, _virtualDrivePort.load(),
+                                   0x11, 0x02,
+                                   static_cast<uint8_t>(inv),    // Speed1 — left motor
+                                   static_cast<uint8_t>(speed),  // Speed2 — right motor
+                                   100};                          // MaxPower
+    return SimpleBLE::ByteArray(reinterpret_cast<const char*>(buf.data()), 9);
 }
 
 SimpleBLE::ByteArray PorscheGt4::buildSteerCmd(int32_t abs_angle) {
