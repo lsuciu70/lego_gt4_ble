@@ -361,12 +361,31 @@ Telemetry PorscheGt4::getLatestTelemetry() const noexcept {
     return _telemetryLatch.load();
 }
 bool PorscheGt4::enableImu() {
+    // Delta interval = 10 (raw units), not 1. LWP3's PORT_INPUT_FORMAT_SETUP
+    // delta interval is the minimum raw-value change before the hub sends a
+    // new notification. delta=1 (report on any change) measured ~95Hz/~56Hz
+    // while the vehicle was moving; delta=10 measured ~16Hz/~5Hz in a
+    // passive (non-driving) hand-rotation test, with the reported values
+    // still tracking real motion.
+    //
+    // delta=10 is better than delta=1 but NOT a confirmed fix: a follow-up
+    // test driving (hybrid virtual/direct, send-on-change TX) WITH IMU
+    // enabled at this delta still stalled silently partway through — no
+    // exception raised, telemetry and encoders simply stopped updating.
+    // Root cause not identified (possibly the combined weight of all 5-6
+    // simultaneous subscriptions, not IMU rate alone). Treat enableImu() as
+    // UNSAFE to rely on during active driving until this is investigated
+    // further — see README.md "IMU" section.
+
+    constexpr uint8_t kImuDelta = 10;
     try {
-        porsche.write_command(SERVICE_UUID, CHAR_UUID,
-                              {0x0A, 0x00, 0x41, PORT_ACCEL, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01});
+        porsche.write_command(
+            SERVICE_UUID, CHAR_UUID,
+            {0x0A, 0x00, 0x41, PORT_ACCEL, 0x00, kImuDelta, 0x00, 0x00, 0x00, 0x01});
         std::this_thread::sleep_for(150ms);
-        porsche.write_command(SERVICE_UUID, CHAR_UUID,
-                              {0x0A, 0x00, 0x41, PORT_GYRO, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01});
+        porsche.write_command(
+            SERVICE_UUID, CHAR_UUID,
+            {0x0A, 0x00, 0x41, PORT_GYRO, 0x00, kImuDelta, 0x00, 0x00, 0x00, 0x01});
         std::this_thread::sleep_for(150ms);
     } catch (...) {
         return false;

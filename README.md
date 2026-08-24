@@ -158,12 +158,23 @@ layer, consistent with the HAL's zero-control-policy design.
 
 **Why opt-in:** while the vehicle is actually moving, mechanical vibration
 makes the accelerometer/gyroscope report at very high rate (measured up to
-~95 Hz / ~56 Hz). That notification volume — traffic *from* the hub, not
-commands sent *to* it — was found on hardware to destabilize the BLE
-connection during real driving. Subscribing to steering position and both
-drive encoders (always on) did not cause this; only accel/gyro did. Call
-`enableImu()` only if your application genuinely needs IMU data and can
-accept that risk; see "Drive Architecture" below for the full story.
+~95 Hz / ~56 Hz at the most sensitive setting). That notification volume —
+traffic *from* the hub, not commands sent *to* it — was found on hardware
+to destabilize the BLE connection during real driving. Subscribing to
+steering position and both drive encoders (always on) did not cause this;
+only accel/gyro did.
+
+`enableImu()` requests a coarser LWP3 "delta interval" (10 raw units
+instead of 1), which cut the rate to ~16 Hz / ~5 Hz in an isolated,
+non-driving test — but a follow-up test that actually drove the vehicle
+(hybrid virtual/direct TX, send-on-change) with IMU enabled at this same
+delta **still stalled partway through, silently — no exception, telemetry
+and encoders simply stopped updating.** The root cause of that stall is
+not identified (possibly the combined weight of ~5-6 simultaneous
+subscriptions, not IMU rate in isolation). **Treat `enableImu()` as unsafe
+to rely on during active driving** until this is investigated further; it
+is more likely to be safe for passive monitoring (vehicle stationary or
+between drive segments) based on what's been tested so far.
 
 ---
 
@@ -301,8 +312,12 @@ up to ~95 Hz / ~56 Hz while the vehicle is actually moving, from
 mechanical vibration — destabilized the connection even with the write-rate
 fix from (1) already in place and even with every other subscription
 (steering, both drive encoders) left on. This is traffic *from* the hub,
-unrelated to anything the application sends. Fix: IMU is opt-in
-(`enableImu()`), not subscribed by `connect()`.
+unrelated to anything the application sends. Mitigation: IMU is opt-in
+(`enableImu()`), not subscribed by `connect()`, and requests a coarser
+notification threshold than the default. **This is not a confirmed
+fix** — see "IMU" above: a follow-up test combining active driving with
+IMU enabled still stalled the connection. Treat IMU as unsafe during
+active driving until this is investigated further.
 
 Earlier in development, (1) alone was misdiagnosed as "the LWP3 virtual
 port is unsafe" — differential commands sent through it produced no
@@ -427,6 +442,10 @@ bool enableImu();
 Subscribes to the hub's accelerometer/gyroscope. Not called automatically
 by `connect()` — see "IMU" above for why. Call after `connect()`, before
 relying on `getAccel()`/`getGyro()`.
+
+**Not confirmed safe during active driving** — see "IMU" above; a
+combined driving + IMU test stalled the connection silently even with the
+reduced notification rate this call requests.
 
 Returns:
 

@@ -334,8 +334,11 @@ destabilized. Accelerometer/gyroscope notifications stream at up to
 vibration) — traffic *from* the hub, unrelated to anything the client
 sends. This alone was enough to drop the connection during real driving,
 even with problem 1 fixed and every other subscription (steering, both
-drive encoders) left enabled. Fix: IMU is opt-in (`enableImu()`, section
-14a), not subscribed by `connect()`.
+drive encoders) left enabled. Mitigation: IMU is opt-in (`enableImu()`,
+section 14a), not subscribed by `connect()`, and requests a coarser
+delta interval than the default. **This is not a confirmed fix** — see
+section 14a: a combined drive+IMU test still stalled the connection even
+with the mitigation in place. Treat IMU as unsafe during active driving.
 
 **What this means for two earlier conclusions in this document's history,
 now corrected:** With only problem 1 fixed (not yet problem 2), testing
@@ -556,12 +559,27 @@ automatically by `connect()`.** Call this explicitly, after `connect()`,
 only if the application genuinely needs IMU data.
 
 Why opt-in, not automatic: accelerometer/gyroscope notifications stream at
-up to ~95 Hz / ~56 Hz while the vehicle is actually moving (mechanical
-vibration causes constant value changes). That notification volume alone
-was found to destabilize the BLE connection during real driving — see
-section 9a, "Problem 2". Steering telemetry and both drive encoders stay
-subscribed unconditionally; they did not cause this. Enabling IMU is a
-deliberate trade-off the client opts into, not a free capability.
+up to ~95 Hz / ~56 Hz (delta interval = 1) while the vehicle is actually
+moving (mechanical vibration causes constant value changes). That
+notification volume alone was found to destabilize the BLE connection
+during real driving — see section 9a, "Problem 2". Steering telemetry and
+both drive encoders stay subscribed unconditionally; they did not cause
+this. Enabling IMU is a deliberate trade-off the client opts into, not a
+free capability.
+
+**Mitigation status — NOT a confirmed fix.** `enableImu()` requests a
+coarser delta interval (10 instead of 1), which cut the notification rate
+to ~16 Hz / ~5 Hz in an isolated, non-driving hand-rotation test. A
+follow-up test that combined active driving (hybrid virtual/direct TX,
+send-on-change — section 9a) with IMU enabled at this same delta still
+stalled the connection partway through, silently: no exception raised,
+telemetry and encoders simply stopped updating. Root cause not identified
+— possibly the combined weight of ~5-6 simultaneous subscriptions
+(steering, accel, gyro, both drive encoders, RSSI) rather than IMU rate
+in isolation. **Do not treat `enableImu()` as safe during active
+driving.** It is more likely to be safe for passive monitoring (vehicle
+stationary, or between drive segments) based on what has actually been
+tested.
 
 Returns:
 
