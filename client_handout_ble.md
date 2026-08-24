@@ -24,8 +24,8 @@ The SDK provides:
 - Drive commands
 - Steering telemetry
 - Raw IMU telemetry (accelerometer + gyroscope, from the hub's internal sensors) — opt-in via `enableImu()`, not subscribed by default; see section 14a
-- BLE link status (RSSI)
-- Drive-encoder telemetry (per-wheel rotation ticks)
+- BLE link status (RSSI) — opt-in via `enableLinkStatus()`, not subscribed by default
+- Drive-encoder telemetry (per-wheel rotation ticks) — opt-in via `enableDriveEncoders()`, not subscribed by default
 - Independent left/right throttle, including differential/skid-turn motion (verified on hardware; see section 9a for the drive architecture behind it)
 - Physical latency measurements
 
@@ -546,7 +546,7 @@ The newest sample always replaces older samples.
 
 ---
 
-# 14a. IMU and Link Status Interfaces
+# 14a. Opt-In Telemetry Interfaces (IMU, Link Status, Drive Encoders)
 
 ## enableImu()
 
@@ -562,10 +562,10 @@ Why opt-in, not automatic: accelerometer/gyroscope notifications stream at
 up to ~95 Hz / ~56 Hz (delta interval = 1) while the vehicle is actually
 moving (mechanical vibration causes constant value changes). That
 notification volume alone was found to destabilize the BLE connection
-during real driving — see section 9a, "Problem 2". Steering telemetry and
-both drive encoders stay subscribed unconditionally; they did not cause
-this. Enabling IMU is a deliberate trade-off the client opts into, not a
-free capability.
+during real driving — see section 9a, "Problem 2". Steering telemetry
+(the only subscription `connect()` sets up unconditionally) did not cause
+this even at ~132 Hz measured. Enabling IMU is a deliberate trade-off the
+client opts into, not a free capability.
 
 **Mitigation status — NOT a confirmed fix.** `enableImu()` requests a
 coarser delta interval (10 instead of 1), which cut the notification rate
@@ -624,6 +624,28 @@ history, no queue, newest sample always wins.
 
 ---
 
+## enableLinkStatus()
+
+```cpp
+bool enableLinkStatus();
+```
+
+Subscribes to the hub's RSSI property. **NOT called automatically by
+`connect()`.** Call this explicitly, after `connect()`, before relying on
+`getLinkStatus()`.
+
+Why opt-in: for interface consistency with `enableImu()` and
+`enableDriveEncoders()` — not because RSSI is risky. This signal ran
+alongside every driving test in this document's history with no observed
+instability.
+
+Returns:
+
+- true if the subscription request was sent successfully
+- false on failure
+
+---
+
 ## getLinkStatus()
 
 ```cpp
@@ -641,6 +663,7 @@ struct LinkStatus
 Source:
 
 The hub's own RSSI property (LWP3 Hub Properties, continuous updates).
+Values only update after a successful `enableLinkStatus()` call.
 
 Intended use:
 
@@ -648,6 +671,29 @@ Detect a degrading BLE link (falling RSSI, or `timestamp_ns` not advancing)
 and stop the vehicle proactively, before the connection actually drops.
 The SDK does not do this automatically — no hidden control policy, same
 design principle as everywhere else in this document.
+
+---
+
+## enableDriveEncoders()
+
+```cpp
+bool enableDriveEncoders();
+```
+
+Subscribes to both drive motors' built-in rotation encoders. **NOT called
+automatically by `connect()`.** Call this explicitly, after `connect()`,
+before relying on `getDriveEncoders()`.
+
+Why opt-in: for interface consistency with `enableImu()` and
+`enableLinkStatus()` — not because drive encoders are risky. This is the
+one telemetry stream actually measured (~264 Hz combined, send-on-change
+TX, wheels suspended) running cleanly alongside driving with zero
+exceptions.
+
+Returns:
+
+- true if the subscription requests were sent successfully
+- false on failure
 
 ---
 
@@ -669,6 +715,7 @@ struct DriveEncoders
 Source:
 
 Each drive motor's own built-in rotation encoder (LWP3 mode 2 / POS).
+Values only update after a successful `enableDriveEncoders()` call.
 
 Sign convention:
 

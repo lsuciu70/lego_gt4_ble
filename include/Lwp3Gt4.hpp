@@ -158,13 +158,38 @@ class PorscheGt4 {
     ImuSample getGyro() const noexcept;
 
     /**
+     * @brief Opt-in subscription to the hub's own RSSI (link quality) property.
+     * NOT enabled automatically by connect() — kept on-request, like enableImu(),
+     * so the application only pays for the telemetry it actually needs. Unlike
+     * enableImu(), this one has been exercised simultaneously with driving in
+     * every hardware test this session with no observed instability; it is
+     * opt-in purely for interface consistency, not as a safety mitigation.
+     * @return true if the subscription request was sent successfully.
+     */
+    bool enableLinkStatus();
+
+    /**
      * @brief Retrieves the latest BLE link status (RSSI), reported by the hub itself.
      * Intended for the application layer to detect a degrading link before it drops.
+     * Only updates after a successful enableLinkStatus() call.
      */
     LinkStatus getLinkStatus() const noexcept;
 
     /**
+     * @brief Opt-in subscription to both drive motors' built-in rotation encoders.
+     * NOT enabled automatically by connect() — kept on-request, like enableImu(),
+     * so the application only pays for the telemetry it actually needs. Unlike
+     * enableImu(), this one has been exercised simultaneously with driving in
+     * every hardware test this session (including the ~264Hz combined
+     * measurement) with no observed instability; it is opt-in purely for
+     * interface consistency, not as a safety mitigation.
+     * @return true if the subscription requests were sent successfully.
+     */
+    bool enableDriveEncoders();
+
+    /**
      * @brief Retrieves the latest cumulative encoder ticks from both drive motors.
+     * Only updates after a successful enableDriveEncoders() call.
      */
     DriveEncoders getDriveEncoders() const noexcept;
 

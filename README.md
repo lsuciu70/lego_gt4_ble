@@ -161,7 +161,7 @@ makes the accelerometer/gyroscope report at very high rate (measured up to
 ~95 Hz / ~56 Hz at the most sensitive setting). That notification volume —
 traffic *from* the hub, not commands sent *to* it — was found on hardware
 to destabilize the BLE connection during real driving. Subscribing to
-steering position and both drive encoders (always on) did not cause this;
+steering position (mandatory) did not cause this even at ~132 Hz measured;
 only accel/gyro did.
 
 `enableImu()` requests a coarser LWP3 "delta interval" (10 raw units
@@ -178,9 +178,14 @@ between drive segments) based on what's been tested so far.
 
 ---
 
-## Link Status (RSSI)
+## Link Status (RSSI) — opt-in, not automatic
 
-The hub reports its own BLE signal strength:
+The hub reports its own BLE signal strength, but **`connect()` does not
+subscribe to it** — call `enableLinkStatus()` explicitly if you want this
+data. (Opt-in for interface consistency with `enableImu()`/
+`enableDriveEncoders()`, not because it's risky: this signal has run
+alongside every driving test done on this hardware with no observed
+instability.)
 
 ```cpp
 struct LinkStatus {
@@ -195,9 +200,15 @@ the BLE connection actually drops.
 
 ---
 
-## Drive Encoders
+## Drive Encoders — opt-in, not automatic
 
-Both drive motors have their own built-in rotation encoder:
+Both drive motors have their own built-in rotation encoder, but
+**`connect()` does not subscribe to them** — call `enableDriveEncoders()`
+explicitly if you want this data. (Opt-in for interface consistency with
+`enableImu()`/`enableLinkStatus()`, not because it's risky: this is the
+one telemetry stream that was actually measured — ~264 Hz combined,
+send-on-change TX, wheels suspended — running cleanly alongside driving
+with zero exceptions.)
 
 ```cpp
 struct DriveEncoders {
@@ -474,13 +485,31 @@ std::cout << a.x << " " << a.y << " " << a.z << std::endl;
 
 ---
 
+## enableLinkStatus()
+
+```cpp
+bool enableLinkStatus();
+```
+
+Subscribes to the hub's RSSI property. Not called automatically by
+`connect()` — see "Link Status (RSSI)" above. Call after `connect()`,
+before relying on `getLinkStatus()`.
+
+Returns:
+
+- true if the subscription request was sent successfully
+- false on failure
+
+---
+
 ## getLinkStatus()
 
 ```cpp
 LinkStatus getLinkStatus() const;
 ```
 
-Returns the latest BLE RSSI reported by the hub.
+Returns the latest BLE RSSI reported by the hub. Only updates after a
+successful `enableLinkStatus()` call.
 
 Example:
 
@@ -492,13 +521,31 @@ std::cout << (int)link.rssi_dbm << " dBm" << std::endl;
 
 ---
 
+## enableDriveEncoders()
+
+```cpp
+bool enableDriveEncoders();
+```
+
+Subscribes to both drive motors' built-in rotation encoders. Not called
+automatically by `connect()` — see "Drive Encoders" above. Call after
+`connect()`, before relying on `getDriveEncoders()`.
+
+Returns:
+
+- true if the subscription requests were sent successfully
+- false on failure
+
+---
+
 ## getDriveEncoders()
 
 ```cpp
 DriveEncoders getDriveEncoders() const;
 ```
 
-Returns the latest cumulative encoder ticks from both drive motors.
+Returns the latest cumulative encoder ticks from both drive motors. Only
+updates after a successful `enableDriveEncoders()` call.
 
 Example:
 

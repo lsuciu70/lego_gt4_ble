@@ -112,21 +112,11 @@ void PorscheGt4::setupHandshake() {
     porsche.write_command(SERVICE_UUID, CHAR_UUID,
                           {0x0A, 0x00, 0x41, PORT_STEER, 0x02, 0x01, 0x00, 0x00, 0x00, 0x01});
     std::this_thread::sleep_for(200ms);
-    // Accel/gyro are NOT subscribed here — see enableImu(). Their high-rate
-    // notification traffic (~95Hz/~56Hz measured while the vehicle is
-    // actually moving) was found to destabilize the BLE connection during
-    // driving; subscribing to them is opt-in via enableImu(), not automatic.
-    porsche.write_command(SERVICE_UUID, CHAR_UUID,
-                          {0x05, 0x00, 0x01, HUB_PROP_RSSI, HUB_PROP_OP_ENABLE_UPDATES});
-    std::this_thread::sleep_for(150ms);
-    // Mode 2 = cumulative rotation counter (POS) on each drive motor's own
-    // built-in encoder, confirmed by live probing.
-    porsche.write_command(SERVICE_UUID, CHAR_UUID,
-                          {0x0A, 0x00, 0x41, PORT_DRIVE_L, 0x02, 0x01, 0x00, 0x00, 0x00, 0x01});
-    std::this_thread::sleep_for(150ms);
-    porsche.write_command(SERVICE_UUID, CHAR_UUID,
-                          {0x0A, 0x00, 0x41, PORT_DRIVE_R, 0x02, 0x01, 0x00, 0x00, 0x00, 0x01});
-    std::this_thread::sleep_for(150ms);
+    // Accel/gyro, RSSI, and drive encoders are NOT subscribed here — only
+    // steering (needed for calibration/closed-loop control) and the virtual
+    // drive port (needed for buildDriveCmd()) are mandatory. Everything else
+    // is opt-in via enableImu()/enableLinkStatus()/enableDriveEncoders(), so
+    // the application only pays for the telemetry it actually needs.
     porsche.write_command(SERVICE_UUID, CHAR_UUID, {0x06, 0x00, 0x61, 0x01, 0x32, 0x33});
     for (int i = 0; i < 20 && _virtualDrivePort.load() == 0xFF; ++i)
         std::this_thread::sleep_for(100ms);
@@ -398,8 +388,33 @@ ImuSample PorscheGt4::getAccel() const noexcept {
 ImuSample PorscheGt4::getGyro() const noexcept {
     return _gyroLatch.load();
 }
+bool PorscheGt4::enableLinkStatus() {
+    try {
+        porsche.write_command(SERVICE_UUID, CHAR_UUID,
+                              {0x05, 0x00, 0x01, HUB_PROP_RSSI, HUB_PROP_OP_ENABLE_UPDATES});
+        std::this_thread::sleep_for(150ms);
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
 LinkStatus PorscheGt4::getLinkStatus() const noexcept {
     return _linkStatus.load();
+}
+bool PorscheGt4::enableDriveEncoders() {
+    // Mode 2 = cumulative rotation counter (POS) on each drive motor's own
+    // built-in encoder, confirmed by live probing.
+    try {
+        porsche.write_command(SERVICE_UUID, CHAR_UUID,
+                              {0x0A, 0x00, 0x41, PORT_DRIVE_L, 0x02, 0x01, 0x00, 0x00, 0x00, 0x01});
+        std::this_thread::sleep_for(150ms);
+        porsche.write_command(SERVICE_UUID, CHAR_UUID,
+                              {0x0A, 0x00, 0x41, PORT_DRIVE_R, 0x02, 0x01, 0x00, 0x00, 0x00, 0x01});
+        std::this_thread::sleep_for(150ms);
+    } catch (...) {
+        return false;
+    }
+    return true;
 }
 DriveEncoders PorscheGt4::getDriveEncoders() const noexcept {
     return _driveEncoders.load();
