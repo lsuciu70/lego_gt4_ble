@@ -95,6 +95,13 @@ Calibration sequence:
 
 Soft steering limits are automatically derived from the measured hardware limits.
 
+Each sweep uses stall detection (position telemetry stops changing) rather
+than a fixed timer, so both directions reach the true mechanical limit
+regardless of friction differences between them — a fixed-duration sweep
+was found to under-travel on the lower-friction side, biasing the computed
+center. A hard time cap (1.5s) still bounds how long the motor pushes
+against the stop.
+
 Calibration is mandatory before vehicle operation.
 
 ---
@@ -130,10 +137,11 @@ Values are available through an atomic latch (lock-free on platforms/builds wher
 
 ---
 
-## IMU (Accelerometer / Gyroscope)
+## IMU (Accelerometer / Gyroscope) — opt-in, not automatic
 
 The Move Hub has an internal 3-axis accelerometer and 3-axis gyroscope. The
-HAL exposes both as raw samples:
+HAL can expose both as raw samples, but **`connect()` does not subscribe to
+them** — call `enableImu()` explicitly if you want this data.
 
 ```cpp
 struct ImuSample {
@@ -147,6 +155,15 @@ struct ImuSample {
 Values are the hub's native raw units — the HAL does not scale, filter, or
 map axes to the chassis. That interpretation belongs in the application
 layer, consistent with the HAL's zero-control-policy design.
+
+**Why opt-in:** while the vehicle is actually moving, mechanical vibration
+makes the accelerometer/gyroscope report at very high rate (measured up to
+~95 Hz / ~56 Hz). That notification volume — traffic *from* the hub, not
+commands sent *to* it — was found on hardware to destabilize the BLE
+connection during real driving. Subscribing to steering position and both
+drive encoders (always on) did not cause this; only accel/gyro did. Call
+`enableImu()` only if your application genuinely needs IMU data and can
+accept that risk; see "Drive Architecture" below for the full story.
 
 ---
 
@@ -182,9 +199,17 @@ struct DriveEncoders {
 Cumulative raw tick counts, sign-corrected so a positive-going count means
 "forward" on that wheel (matching `Command::throttle_left/right`). No
 ticks-per-revolution or wheel-circumference scaling is applied — that
-belongs in the application layer. Verified on hardware for symmetric
-(straight-line) driving; see the Command section above for the differential
-caveat.
+belongs in the application layer. Verified on hardware, including a rough
+field calibration: ~15 ticks/cm (~1515 ticks/m) at throttle 30, on carpet.
+Treat that figure as a starting point, not a precise constant — it will
+vary with surface, battery level, and throttle.
+
+Note: the two drive motors measured a real, mechanical ~10-18% speed
+difference from each other at identical commanded throttle in testing
+(friction/traction, not a software bug) — expect the vehicle to drift
+slightly off a straight line under open-loop symmetric throttle. An
+application layer can use these per-wheel encoder deltas to correct for it
+in closed loop.
 
 ---
 
@@ -237,14 +262,72 @@ Positive throttle always means "that wheel spins forward" — the HAL
 corrects for the mirrored motor mounting internally. Set
 `throttle_left == throttle_right` to drive straight.
 
-**Known limitation:** symmetric driving (`throttle_left == throttle_right`)
-is verified working end-to-end, including drive-encoder feedback.
-Genuinely differential values (opposite signs, e.g. for an in-place skid
-turn) are accepted by the API and protocol, but on-hardware testing showed
-**no wheel movement** in that case — the drive motors' virtual port may
-have a firmware-level constraint limiting it to symmetric/mirrored motion.
-Not yet root-caused; treat differential throttle as unverified until this
-is investigated further (see client_handout_ble.md, section 9a).
+For symmetric commands (`throttle_left == throttle_right`), the HAL sends
+one atomic packet through the LWP3 virtual/combined port. For differential
+commands, it sends two direct per-motor writes, always together even if
+only one side changed — see "Drive Architecture" below. Verified on
+hardware for both cases, including an in-place skid turn confirmed via
+drive-encoder feedback.
+
+---
+
+## Drive Architecture: Send-On-Change, Not Fixed-Rate
+
+**Commands are transmitted on change (plus a low-rate keepalive), not
+retransmitted at a fixed high frequency.** This is the actual fix behind a
+long day of hardware debugging — read on before changing `txLoop()`.
+
+### What actually caused the connection to drop
+
+Two separate, unrelated problems were found and fixed during development,
+and it's worth recording both since they looked identical from the
+outside ("BLE connection drops during driving"):
+
+**1. Outgoing write rate.** Retransmitting a drive command at a fixed
+~50 Hz — the SDK's originally documented control-loop rate — reliably
+dropped the BLE connection within 1-2 seconds, regardless of whether the
+command value was actually changing. A command sent once and never
+repeated, or repeated at ~1 Hz, was reliable over many repeated hardware
+tests (15-32s each). Fix: `txLoop()` now sends a command immediately when
+it changes, and otherwise repeats the last command at most once per
+`_keepaliveIntervalNs` (1s), with a small floor (`_txRateLimitNs`, 50ms)
+even if the command is changing every tick. **The true safe ceiling for a
+command that changes faster than ~1 Hz has not been characterized** —
+only "changes at human/decision-loop pace, ~1x/s or slower" is validated.
+
+**2. Incoming IMU notification volume.** Independently, enabling
+accelerometer/gyroscope notifications (see "IMU" above) — which stream at
+up to ~95 Hz / ~56 Hz while the vehicle is actually moving, from
+mechanical vibration — destabilized the connection even with the write-rate
+fix from (1) already in place and even with every other subscription
+(steering, both drive encoders) left on. This is traffic *from* the hub,
+unrelated to anything the application sends. Fix: IMU is opt-in
+(`enableImu()`), not subscribed by `connect()`.
+
+Earlier in development, (1) alone was misdiagnosed as "the LWP3 virtual
+port is unsafe" — differential commands sent through it produced no
+movement, and once (2) started causing drops during testing, switching
+between the virtual port and direct per-motor writes looked like the
+trigger. Neither conclusion held up once (1) and (2) were both fixed and
+retested: the virtual port has been reliable, including differential
+commands and switching to/from direct writes mid-session, once problems
+(1) and (2) above stopped confounding the results.
+
+### Why direct writes are still used for differential commands
+
+The virtual port's combined "Speed1/Speed2" packet reliably produced no
+wheel movement for opposite-sign values on this hub (a real, reproducible
+finding, unrelated to (1) or (2) above and not yet explained). Symmetric
+values through the virtual port work fine. So: symmetric → virtual port
+(atomic, no timing gap); differential → two direct per-motor writes.
+
+One more hardware finding for the direct-write path: writing to only ONE
+physical motor port while the pair is still grouped under the virtual port
+(created at connect() regardless — see `setupHandshake()`) stops the
+*other*, untouched motor too, as if the hub treats a lone write as
+breaking the group's synchronization. So even though only one wheel's
+value may have changed, `txLoop()` always writes both physical ports
+together on the differential path.
 
 ---
 
@@ -335,6 +418,23 @@ std::cout << t.steer_pos << std::endl;
 
 ---
 
+## enableImu()
+
+```cpp
+bool enableImu();
+```
+
+Subscribes to the hub's accelerometer/gyroscope. Not called automatically
+by `connect()` — see "IMU" above for why. Call after `connect()`, before
+relying on `getAccel()`/`getGyro()`.
+
+Returns:
+
+- true if the subscription requests were sent successfully
+- false on failure
+
+---
+
 ## getAccel() / getGyro()
 
 ```cpp
@@ -343,7 +443,7 @@ ImuSample getGyro() const;
 ```
 
 Return the latest raw sample from the hub's internal accelerometer /
-gyroscope.
+gyroscope. Only updates after a successful `enableImu()` call.
 
 Example:
 
@@ -568,6 +668,17 @@ Latency and reliability may vary between adapters and operating systems.
 This project is experimental robotics software.
 
 Do not use it in any application where malfunction could cause injury or property damage.
+
+Concretely, this has already happened during development: when the BLE
+connection dropped mid-drive (see "Drive Architecture" above for the two
+causes that were found and fixed), the hub kept executing the last command
+it had received — indefinitely, with the wheels still spinning — because
+**the hub has no command-timeout/watchdog of its own**. There is no
+software-side way to stop the vehicle once the connection is actually
+gone; a `disconnect()` call or a `sendCommand({0,0,0})` cannot reach a hub
+it's no longer connected to. This is a hardware/firmware characteristic of
+the hub, not something this HAL can fix. Always be prepared to cut power
+by hand; do not rely on software-only stop.
 
 ---
 

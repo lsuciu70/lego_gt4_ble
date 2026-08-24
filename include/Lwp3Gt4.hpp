@@ -134,12 +134,26 @@ class PorscheGt4 {
     Telemetry getLatestTelemetry() const noexcept;
 
     /**
+     * @brief Opt-in subscription to the hub's internal accelerometer/gyroscope.
+     * NOT enabled automatically by connect() — the resulting notification
+     * traffic (measured up to ~95Hz/~56Hz while the vehicle is actually in
+     * motion, from mechanical vibration) was found to destabilize the BLE
+     * connection during real driving on this hardware. Call this only if the
+     * application genuinely needs IMU data and can accept that trade-off;
+     * see README.md / client_handout_ble.md for the full finding.
+     * @return true if the subscription requests were sent successfully.
+     */
+    bool enableImu();
+
+    /**
      * @brief Retrieves the latest raw accelerometer sample from the hub's internal IMU.
+     * Only updates after a successful enableImu() call.
      */
     ImuSample getAccel() const noexcept;
 
     /**
      * @brief Retrieves the latest raw gyroscope sample from the hub's internal IMU.
+     * Only updates after a successful enableImu() call.
      */
     ImuSample getGyro() const noexcept;
 
@@ -197,10 +211,23 @@ class PorscheGt4 {
     std::vector<float> _latencySamples;
     const float _epsilon = 3.0f;  // Degrees of mechanical play/slop.
 
-    // Requirement 1: Non-blocking Rate Gate
-    // Logic: Ensures D-Bus stability without sleeping the TX thread.
+    // Transmission gating: send-on-change + low-rate keepalive, not a fixed
+    // high-frequency retransmit. Sustained ~50Hz retransmission (regardless
+    // of whether values were actually changing) was found to reliably drop
+    // the BLE connection within 1-2s on this hardware; a command that is
+    // sent once and never repeated, or repeated at ~1Hz, was reliable over
+    // repeated 15-32s hardware tests. A genuine change is sent right away
+    // (only bounded by the small floor below); an unchanged command is
+    // repeated at most once per _keepaliveIntervalNs. This matches how a
+    // real operator/controller behaves — the command value itself changes
+    // at human/decision-loop pace (not faster than ~1x/s in practice), so
+    // the floor is just a cheap backstop, not the thing doing the real work.
+    // The true safe ceiling for a command that changes on EVERY control
+    // tick (e.g. continuous steering correction faster than ~1Hz) has NOT
+    // been characterized.
     std::atomic<TimestampNs> _lastTxTime{0};
-    const uint64_t _txRateLimitNs = 15'000'000;  // 15ms safety gate.
+    const uint64_t _txRateLimitNs = 50'000'000;      // 50ms floor even if changing every tick.
+    const uint64_t _keepaliveIntervalNs = 1'000'000'000;  // 1s keepalive when unchanged.
 
     /** @brief The high-priority TX loop handling dual-packet LWP3 dispatches. */
     void txLoop(std::stop_token st);
@@ -217,6 +244,7 @@ class PorscheGt4 {
     // Packet Builders
     SimpleBLE::ByteArray buildSteerCmd(int32_t abs_angle);
     SimpleBLE::ByteArray buildDriveCmd(int8_t left, int8_t right);
+    SimpleBLE::ByteArray buildSingleDriveCmd(uint8_t port, int8_t power);
 
     /** @brief Moves the steering rack until a physical stall is detected. */
     int32_t sweep_to_limit(int8_t speed);

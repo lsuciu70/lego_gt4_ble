@@ -23,10 +23,10 @@ The SDK provides:
 - Steering commands
 - Drive commands
 - Steering telemetry
-- Raw IMU telemetry (accelerometer + gyroscope, from the hub's internal sensors)
+- Raw IMU telemetry (accelerometer + gyroscope, from the hub's internal sensors) — opt-in via `enableImu()`, not subscribed by default; see section 14a
 - BLE link status (RSSI)
 - Drive-encoder telemetry (per-wheel rotation ticks)
-- Independent left/right throttle (symmetric driving verified; see section 9a for a known differential-drive limitation)
+- Independent left/right throttle, including differential/skid-turn motion (verified on hardware; see section 9a for the drive architecture behind it)
 - Physical latency measurements
 
 The SDK does NOT provide:
@@ -170,11 +170,20 @@ Discover actual steering limits.
 
 Process:
 
-1. Find left mechanical stop
-2. Find right mechanical stop
+1. Find left mechanical stop (stall detection, not a fixed timer)
+2. Find right mechanical stop (stall detection, not a fixed timer)
 3. Compute center position
 4. Move steering to center
 5. Store center internally
+
+Each sweep stops as soon as position telemetry stops changing (stalled
+against the physical limit), capped at 1.5s as a hard safety ceiling. A
+fixed-duration sweep was tried first and found to be unreliable: friction
+differs between the two sweep directions (~18% more travel in the same
+time on one side than the other in testing), so a fixed timer reaches the
+limit asymmetrically and biases the computed center — this was confirmed
+visually as a steering rack that stayed noticeably off-center after
+calibration.
 
 Result:
 
@@ -291,30 +300,78 @@ For straight-line driving, set `throttle_left == throttle_right`.
 
 ---
 
-# 9a. Differential Drive (KNOWN LIMITATION)
+# 9a. Drive Architecture: Send-On-Change, Hybrid Virtual/Direct (READ BEFORE MODIFYING)
 
-The API and the underlying LWP3 virtual port accept independent
-`throttle_left` / `throttle_right` values.
+For symmetric commands (`throttle_left == throttle_right`), the HAL sends
+one atomic packet through the LWP3 virtual/combined port. For differential
+commands, it sends two direct per-motor writes (`PORT_OUTPUT_COMMAND`, one
+per physical motor port), always both together even if only one side
+changed. Commands are transmitted on change plus a low-rate keepalive —
+see section 12 — not retransmitted at a fixed high frequency.
 
-Verified on hardware:
+## History: two real problems that looked like one
 
-```text
-throttle_left == throttle_right   -> both wheels drive, encoders confirm motion
-```
+Development went through several iterations misdiagnosing what turned out
+to be two independent problems, both producing the same external symptom
+("BLE connection drops during driving"). Recorded here so the same ground
+isn't re-covered:
 
-NOT yet working, verified on hardware:
+**Problem 1 — outgoing write rate.** Retransmitting a drive command at a
+fixed ~50 Hz (the SDK's originally documented control-loop rate)
+reliably dropped the BLE connection within 1-2 seconds on this hardware,
+regardless of whether the command value was actually changing. A command
+sent once and never repeated, or repeated at ~1 Hz, was reliable across
+many repeated hardware tests (15-32s each, including differential
+commands and alternating between the virtual port and direct writes
+mid-session). Fix: send-on-change + ~1Hz keepalive (section 12). The safe
+ceiling for a command that changes faster than ~1 Hz has NOT been
+characterized.
 
-```text
-throttle_left == -throttle_right  -> NO wheel movement observed
-                                      (e.g. {0, 30, -30} for an in-place turn)
-```
+**Problem 2 — incoming IMU notification volume**, found independently,
+after problem 1 was already fixed and driving still occasionally
+destabilized. Accelerometer/gyroscope notifications stream at up to
+~95 Hz / ~56 Hz while the vehicle is actually moving (mechanical
+vibration) — traffic *from* the hub, unrelated to anything the client
+sends. This alone was enough to drop the connection during real driving,
+even with problem 1 fixed and every other subscription (steering, both
+drive encoders) left enabled. Fix: IMU is opt-in (`enableImu()`, section
+14a), not subscribed by `connect()`.
 
-The drive motors' virtual port may have a firmware-level constraint that
-limits it to symmetric/mirrored motion. This has not been root-caused.
+**What this means for two earlier conclusions in this document's history,
+now corrected:** With only problem 1 fixed (not yet problem 2), testing
+looked exactly like "the virtual port is unsafe to mix with direct
+writes" — switching between them appeared to leave the hub unresponsive.
+That conclusion did not hold up once problem 2 was also fixed and
+retested: alternating between the virtual port and direct writes
+repeatedly, mid-session, has been reliable. If you see connection drops
+during driving again, suspect problem 1 or 2 recurring (or a third,
+undiscovered cause) before suspecting the virtual/direct split itself.
 
-Until this is investigated further, clients should treat differential
-(opposite-sign) throttle values as unsupported, even though the API accepts
-them without error.
+## Why direct writes are still used for differential commands
+
+Independent of problems 1 and 2 above: the virtual port's combined
+"Speed1/Speed2" packet reliably produces NO wheel movement for
+opposite-sign values on this hub. This is a real, reproducible finding,
+confirmed with full exception visibility (not a swallowed connection
+error) — not yet root-caused. Symmetric values through the virtual port
+work correctly. Hence: symmetric → virtual port; differential → direct.
+
+One more hardware finding for the direct-write path: writing to only ONE
+physical motor port while the pair is still grouped under the virtual
+port (created at connect() regardless — see `setupHandshake()`) stops the
+*other*, untouched motor too, as if the hub treats a lone write as
+breaking the group's synchronization. So `txLoop()` always writes both
+physical ports together on the differential path, even when only one
+wheel's value changed.
+
+## Trade-off of the direct-write path
+
+The two writes (left motor, right motor) are sequential BLE packets, not
+one atomic packet, so there is a small timing gap between when the left
+and right motor receive their target speed. This was audible as a brief
+slip/chirp at the start of a hard acceleration in testing. Ramp throttle
+rather than commanding it instantaneously if this matters for your
+application.
 
 ---
 
@@ -373,33 +430,46 @@ Can be called concurrently with sendCommand().
 
 # 12. Internal Transmission Rate
 
-The SDK applies an internal transmission gate.
+The SDK does NOT retransmit at a fixed high frequency. It uses send-on-
+change plus a low-rate keepalive — see section 9a for why (a fixed ~50 Hz
+retransmit reliably dropped the BLE connection).
 
-Current limit:
-
-```text
-15 ms
-```
-
-Equivalent maximum update frequency:
+Behavior:
 
 ```text
-66 Hz
+Command changed since last transmit?
+  -> sent immediately (bounded by a small floor, currently 50ms,
+     even if the value is changing every tick)
+
+Command unchanged since last transmit?
+  -> resent at most once per keepalive interval (currently 1s)
 ```
 
-Recommended client control loop:
+Clients can still call `sendCommand()` as often as they like (e.g. every
+control tick at 50 Hz) — the HAL decides internally whether that actually
+produces a BLE transmission. Calling it often with an unchanged value is
+cheap and expected; it is NOT the same as commanding a fast BLE write rate.
+
+Validated on hardware:
 
 ```text
-50 Hz
+Command sent once, never repeated           -> reliable (20s test)
+Command repeated at ~1 Hz                    -> reliable (20s test)
+Command changing at human/decision pace
+  (~4s between changes in testing)           -> reliable (32s test)
 ```
 
-Equivalent:
+NOT validated:
 
 ```text
-20 ms period
+Command changing continuously faster than ~1 Hz
+  (e.g. a closed-loop controller adjusting steering every tick)
 ```
 
-This matches BLE behavior and steering dynamics.
+If your application needs updates faster than ~1 Hz on a value that is
+genuinely changing that often (not just being re-sent unchanged), test
+that specific pattern before relying on it — see section 9a for the full
+background this recommendation comes from.
 
 ---
 
@@ -475,6 +545,31 @@ The newest sample always replaces older samples.
 
 # 14a. IMU and Link Status Interfaces
 
+## enableImu()
+
+```cpp
+bool enableImu();
+```
+
+Subscribes to the hub's accelerometer/gyroscope. **NOT called
+automatically by `connect()`.** Call this explicitly, after `connect()`,
+only if the application genuinely needs IMU data.
+
+Why opt-in, not automatic: accelerometer/gyroscope notifications stream at
+up to ~95 Hz / ~56 Hz while the vehicle is actually moving (mechanical
+vibration causes constant value changes). That notification volume alone
+was found to destabilize the BLE connection during real driving — see
+section 9a, "Problem 2". Steering telemetry and both drive encoders stay
+subscribed unconditionally; they did not cause this. Enabling IMU is a
+deliberate trade-off the client opts into, not a free capability.
+
+Returns:
+
+- true if the subscription requests were sent successfully
+- false on failure
+
+---
+
 ## getAccel() / getGyro()
 
 ```cpp
@@ -495,7 +590,8 @@ struct ImuSample
 Source:
 
 The Move Hub has an internal 3-axis accelerometer and 3-axis gyroscope.
-The SDK subscribes to both and exposes the raw samples.
+Values only update after a successful `enableImu()` call; before that,
+these return a zeroed/stale sample.
 
 Units:
 
@@ -564,12 +660,22 @@ Positive-going ticks mean "forward" on that wheel, matching
 Units:
 
 Raw encoder ticks. No ticks-per-revolution or wheel-circumference scaling
-is applied — that mapping is the client's responsibility.
+is applied — that mapping is the client's responsibility. Rough field
+calibration measured in testing: ~15 ticks/cm (~1515 ticks/m) at throttle
+30, on carpet — a starting point only, expect it to vary with surface,
+battery level, and throttle.
 
 Verification status:
 
-Confirmed correct on hardware for symmetric (straight-line) driving. See
-section 9a for the differential-drive limitation.
+Confirmed correct on hardware for both symmetric and differential driving
+(see section 9a).
+
+Also confirmed useful diagnostically: in testing, the two drive motors
+showed a real ~10-18% speed difference from each other at identical
+commanded throttle (mechanical, not a software bug), which explained a
+vehicle drifting off a straight line under open-loop symmetric throttle.
+A client can use the per-wheel encoder deltas to correct for this in
+closed loop.
 
 ---
 
@@ -687,8 +793,22 @@ The SDK does not guarantee:
 - fixed steering response
 - obstacle avoidance
 - vehicle safety
+- that the vehicle can always be stopped in software
 
 The vehicle remains a physical system subject to mechanical and wireless limitations.
+
+On that last point specifically: during development, the BLE connection
+dropped mid-drive on multiple occasions (root causes: section 9a). Each
+time, the hub kept executing the last command it had received —
+indefinitely, wheels still spinning — because **the hub has no
+command-timeout/watchdog of its own**. There is no software-side way to
+stop the vehicle once the connection is actually gone: neither
+`disconnect()` nor `sendCommand({0,0,0})` can reach a hub that's no longer
+connected. This is a hardware/firmware characteristic of the hub, not
+something this SDK can fix, and it is not specific to any one drive
+architecture — it will recur if the connection drops for any reason,
+known or not. Clients must always be able to cut power to the hub by hand
+and must not rely on software-only stop as the sole safety mechanism.
 
 ---
 
@@ -712,6 +832,11 @@ Recommended frequency:
 ```text
 50 Hz
 ```
+
+Calling `sendCommand()` at 50 Hz is expected and fine even though the HAL
+does not transmit at 50 Hz internally — see section 12. The actual BLE
+write rate is decided by the HAL (send-on-change + ~1Hz keepalive), not by
+how often the client calls `sendCommand()`.
 
 ---
 

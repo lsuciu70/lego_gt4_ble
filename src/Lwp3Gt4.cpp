@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <iostream>
 
 #include "Lwp3Constants.hpp"
 
@@ -91,8 +92,9 @@ void PorscheGt4::setupHandshake() {
             int32_t val;
             std::memcpy(&val, &raw[4], sizeof(int32_t));
             // Left channel command is sign-flipped for the mirrored mount (see
-            // buildDriveCmd); flip the encoder reading back so a positive-going
-            // count means "forward" on this wheel too, matching the right side.
+            // buildDriveCmd/buildSingleDriveCmd); flip the encoder reading back
+            // so a positive-going count means "forward" on this wheel too,
+            // matching the right side.
             auto prev = _driveEncoders.load();
             _driveEncoders.store({-val, prev.right_ticks, getNowNs()});
         }
@@ -110,12 +112,10 @@ void PorscheGt4::setupHandshake() {
     porsche.write_command(SERVICE_UUID, CHAR_UUID,
                           {0x0A, 0x00, 0x41, PORT_STEER, 0x02, 0x01, 0x00, 0x00, 0x00, 0x01});
     std::this_thread::sleep_for(200ms);
-    porsche.write_command(SERVICE_UUID, CHAR_UUID,
-                          {0x0A, 0x00, 0x41, PORT_ACCEL, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01});
-    std::this_thread::sleep_for(150ms);
-    porsche.write_command(SERVICE_UUID, CHAR_UUID,
-                          {0x0A, 0x00, 0x41, PORT_GYRO, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01});
-    std::this_thread::sleep_for(150ms);
+    // Accel/gyro are NOT subscribed here — see enableImu(). Their high-rate
+    // notification traffic (~95Hz/~56Hz measured while the vehicle is
+    // actually moving) was found to destabilize the BLE connection during
+    // driving; subscribing to them is opt-in via enableImu(), not automatic.
     porsche.write_command(SERVICE_UUID, CHAR_UUID,
                           {0x05, 0x00, 0x01, HUB_PROP_RSSI, HUB_PROP_OP_ENABLE_UPDATES});
     std::this_thread::sleep_for(150ms);
@@ -133,40 +133,82 @@ void PorscheGt4::setupHandshake() {
 }
 
 void PorscheGt4::txLoop(std::stop_token st) {
+    // Send-on-change + low-rate keepalive. NOT a fixed high-frequency
+    // retransmit — see the comment on _txRateLimitNs/_keepaliveIntervalNs in
+    // the header and client_handout_ble.md section 9a. `lastSent` is plain
+    // (non-atomic) local state: only this thread ever reads or writes it.
+    Command lastSent{0, 0, 0};
+    bool hasSentOnce = false;   // true after the first SUCCESSFUL transmission (change baseline)
+    bool hasAttempted = false;  // true after the first attempt, success or failure (rate-floor gate)
+
     while (!st.stop_requested()) {
         std::unique_lock lock(_txMtx);
-        // Wait for command or timeout (Keepalive)
         _txCv.wait_for(lock, 100ms, [&] { return _hasNewCmd.load() || st.stop_requested(); });
         if (st.stop_requested()) return;
 
         TimestampNs now = getNowNs();
-
-        // Requirement 1: Non-blocking Rate Gate
-        if (now - _lastTxTime.load() < _txRateLimitNs) {
-            continue;  // Skip this tick, don't sleep the thread
-        }
-
         Command target = _latestCmd.load();
         _hasNewCmd.store(false);
         lock.unlock();
 
         if (!_isCalibrated.load() || _virtualDrivePort.load() == 0xFF) continue;
 
+        bool changed = !hasSentOnce || target.steer != lastSent.steer ||
+                       target.throttle_left != lastSent.throttle_left ||
+                       target.throttle_right != lastSent.throttle_right;
+        bool keepaliveDue = (now - _lastTxTime.load()) >= _keepaliveIntervalNs;
+        if (!changed && !keepaliveDue) continue;
+        // Safety floor even if the command is changing every tick (e.g. a
+        // continuous steering correction) — see header comment: the safe
+        // ceiling for that case is untested, this is a conservative guess.
+        // Gated on hasAttempted (not hasSentOnce) so this floor also applies
+        // while every attempt is failing (e.g. a dropped connection) —
+        // otherwise a run of failures never sets hasSentOnce, "changed"
+        // stays permanently true, and this check would never fire.
+        if (hasAttempted && (now - _lastTxTime.load()) < _txRateLimitNs) continue;
+
+        // Record the attempt time (not just successes) BEFORE writing, so a
+        // failing connection still gets throttled by the floor/keepalive
+        // gates above instead of retrying on every subsequent wake — a
+        // stale _lastTxTime after a failed write previously reopened both
+        // gates immediately, causing a ~50Hz retry storm during an outage.
+        _lastTxTime.store(now);
+        hasAttempted = true;
+
         try {
-            porsche.write_command(
-                SERVICE_UUID, CHAR_UUID,
-                buildDriveCmd(static_cast<int8_t>(target.throttle_left),
-                             static_cast<int8_t>(target.throttle_right)));
+            auto left = static_cast<int8_t>(target.throttle_left);
+            auto right = static_cast<int8_t>(target.throttle_right);
+
+            if (left == right) {
+                // Symmetric: single atomic packet via the virtual port.
+                porsche.write_command(SERVICE_UUID, CHAR_UUID, buildDriveCmd(left, right));
+            } else {
+                // Differential: direct writes, but ALWAYS both motors
+                // together, even though only one value may have changed.
+                // Confirmed on hardware: writing just one physical motor
+                // port while the pair is still grouped under the virtual
+                // port (created at connect(), see setupHandshake()) stops
+                // the untouched motor too, as if the hub treats a lone
+                // write as breaking synchronization within the group.
+                porsche.write_command(SERVICE_UUID, CHAR_UUID,
+                                      buildSingleDriveCmd(PORT_DRIVE_L, static_cast<int8_t>(-left)));
+                porsche.write_command(SERVICE_UUID, CHAR_UUID,
+                                      buildSingleDriveCmd(PORT_DRIVE_R, right));
+            }
             porsche.write_command(SERVICE_UUID, CHAR_UUID,
                                   buildSteerCmd(hardwareCenter + target.steer));
 
-            _lastTxTime.store(now);
+            lastSent = target;
+            hasSentOnce = true;
 
             // Record for Epsilon Matching
             std::lock_guard<std::mutex> sLock(_statsMtx);
             _inflight.push_back({target.steer, now});
             if (_inflight.size() > 20) _inflight.erase(_inflight.begin());
+        } catch (const std::exception& e) {
+            std::cerr << "[txLoop] write_command threw: " << e.what() << "\n" << std::flush;
         } catch (...) {
+            std::cerr << "[txLoop] write_command threw non-std exception\n" << std::flush;
         }
     }
 }
@@ -215,9 +257,14 @@ LatencyStats PorscheGt4::getLatencyStats() {
 }
 
 SimpleBLE::ByteArray PorscheGt4::buildDriveCmd(int8_t left, int8_t right) {
-    // Subcommand 0x02: Start Speed for virtual port (Speed1, Speed2, MaxPower).
-    // PORT_DRIVE_L (0x32) is mounted mirror-image to PORT_DRIVE_R (0x33), so
-    // Speed1 (left) must be negated for positive `left` to mean "forward".
+    // Subcommand 0x02: Start Speed for the virtual port (Speed1, Speed2,
+    // MaxPower) — one atomic packet, both wheels together, closed-loop.
+    // Only used for symmetric commands (left == right); see txLoop(). Was
+    // previously believed unsafe for ANY use based on tests at ~50Hz
+    // retransmission; re-validated as safe, including switching to/from
+    // buildSingleDriveCmd() mid-session, once transmission is send-on-change
+    // rather than a fixed high-frequency retransmit. See
+    // client_handout_ble.md section 9a for the full history.
     int8_t inv = static_cast<int8_t>(-left);
     std::array<uint8_t, 9> buf = {0x09, 0x00, 0x81, _virtualDrivePort.load(),
                                    0x11, 0x02,
@@ -225,6 +272,17 @@ SimpleBLE::ByteArray PorscheGt4::buildDriveCmd(int8_t left, int8_t right) {
                                    static_cast<uint8_t>(right),  // Speed2 — right motor
                                    100};                          // MaxPower
     return SimpleBLE::ByteArray(reinterpret_cast<const char*>(buf.data()), 9);
+}
+
+SimpleBLE::ByteArray PorscheGt4::buildSingleDriveCmd(uint8_t port, int8_t power) {
+    // Subcommand 0x01: StartPower for a single physical motor port (same
+    // format already used for the steering sweep in sweep_to_limit()). Used
+    // only for differential commands (left != right); see txLoop() and
+    // client_handout_ble.md section 9a for why both ports are always
+    // written together even though only one value may have changed.
+    std::array<uint8_t, 7> buf = {0x07, 0x00, 0x81, port, 0x11, 0x01,
+                                   static_cast<uint8_t>(power)};
+    return SimpleBLE::ByteArray(reinterpret_cast<const char*>(buf.data()), 7);
 }
 
 SimpleBLE::ByteArray PorscheGt4::buildSteerCmd(int32_t abs_angle) {
@@ -258,10 +316,39 @@ bool PorscheGt4::autoCalibrate() {
 }
 
 int32_t PorscheGt4::sweep_to_limit(int8_t speed) {
+    // Stall detection instead of a fixed sweep duration: friction differs
+    // between the two directions (measured ~18% more raw travel in 1s one
+    // way than the other), so a fixed timer doesn't reach the true
+    // mechanical limit symmetrically and biases the computed center.
+    // Cutting power as soon as the rack stops moving is also *gentler* on
+    // the gears than the old fixed-1s sweep, which kept pushing for the
+    // full second even after an early stall.
     porsche.write_command(SERVICE_UUID, CHAR_UUID,
                           {0x07, 0x00, 0x81, 0x34, 0x11, 0x01, static_cast<uint8_t>(speed)});
-    std::this_thread::sleep_for(1s);
+
+    constexpr auto kMaxSweepDuration = 1500ms;  // hard safety ceiling
+    constexpr auto kPollInterval = 50ms;
+    constexpr auto kStallWindow = 200ms;  // no meaningful movement for this long => stalled
+    constexpr int32_t kStallEpsilonRaw = 2;
+
+    std::this_thread::sleep_for(150ms);  // let it get moving before checking for stall
+    auto start = std::chrono::steady_clock::now();
+    int32_t lastPos = _rawSteerPos.load();
+    auto lastMoveTime = start;
+
+    while (std::chrono::steady_clock::now() - start < kMaxSweepDuration) {
+        std::this_thread::sleep_for(kPollInterval);
+        int32_t pos = _rawSteerPos.load();
+        if (std::abs(pos - lastPos) > kStallEpsilonRaw) {
+            lastPos = pos;
+            lastMoveTime = std::chrono::steady_clock::now();
+        } else if (std::chrono::steady_clock::now() - lastMoveTime > kStallWindow) {
+            break;  // stalled against the mechanical limit
+        }
+    }
+
     porsche.write_command(SERVICE_UUID, CHAR_UUID, {0x07, 0x00, 0x81, 0x34, 0x11, 0x01, 0x00});
+    std::this_thread::sleep_for(200ms);  // settle (measured to barely matter, but cheap)
     return _rawSteerPos.load();
 }
 
@@ -272,6 +359,19 @@ void PorscheGt4::sendReliable(const SimpleBLE::ByteArray& data) {
 
 Telemetry PorscheGt4::getLatestTelemetry() const noexcept {
     return _telemetryLatch.load();
+}
+bool PorscheGt4::enableImu() {
+    try {
+        porsche.write_command(SERVICE_UUID, CHAR_UUID,
+                              {0x0A, 0x00, 0x41, PORT_ACCEL, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01});
+        std::this_thread::sleep_for(150ms);
+        porsche.write_command(SERVICE_UUID, CHAR_UUID,
+                              {0x0A, 0x00, 0x41, PORT_GYRO, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01});
+        std::this_thread::sleep_for(150ms);
+    } catch (...) {
+        return false;
+    }
+    return true;
 }
 ImuSample PorscheGt4::getAccel() const noexcept {
     return _accelLatch.load();
