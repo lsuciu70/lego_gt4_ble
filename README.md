@@ -156,25 +156,27 @@ Values are the hub's native raw units — the HAL does not scale, filter, or
 map axes to the chassis. That interpretation belongs in the application
 layer, consistent with the HAL's zero-control-policy design.
 
-**Why opt-in:** while the vehicle is actually moving, mechanical vibration
-makes the accelerometer/gyroscope report at very high rate (measured up to
-~95 Hz / ~56 Hz at the most sensitive setting). That notification volume —
-traffic *from* the hub, not commands sent *to* it — was found on hardware
-to destabilize the BLE connection during real driving. Subscribing to
-steering position (mandatory) did not cause this even at ~132 Hz measured;
-only accel/gyro did.
+**Why opt-in:** kept on-request for interface consistency with the other
+telemetry streams, not because it's inherently risky on its own — see
+below.
 
-`enableImu()` requests a coarser LWP3 "delta interval" (10 raw units
-instead of 1), which cut the rate to ~16 Hz / ~5 Hz in an isolated,
-non-driving test — but a follow-up test that actually drove the vehicle
-(hybrid virtual/direct TX, send-on-change) with IMU enabled at this same
-delta **still stalled partway through, silently — no exception, telemetry
-and encoders simply stopped updating.** The root cause of that stall is
-not identified (possibly the combined weight of ~5-6 simultaneous
-subscriptions, not IMU rate in isolation). **Treat `enableImu()` as unsafe
-to rely on during active driving** until this is investigated further; it
-is more likely to be safe for passive monitoring (vehicle stationary or
-between drive segments) based on what's been tested so far.
+**Confirmed finding: IMU and drive encoders are mutually exclusive.**
+`enableImu()` at delta=1 (report on any change — the accelerometer/
+gyroscope report at up to ~95 Hz / ~56 Hz from mechanical vibration while
+actually driving) is **confirmed safe**, reproduced clean over 32s of
+active driving (alternating virtual-port/direct-port commands). The
+earlier belief that IMU's own notification rate was the problem (and the
+resulting delta=10 "mitigation") turned out to be a wrong diagnosis: that
+version still stalled during driving, which was confusing until isolated
+properly. **Enabling IMU together with `enableDriveEncoders()` at the same
+time reliably breaks the BLE connection within seconds of driving** —
+reproduced twice, either as a thrown `"Peripheral is not connected"` or a
+silent telemetry freeze. Either one alone (even IMU at delta=1, or
+encoders at their ~264 Hz combined measured rate) is safe; the two
+together are not. RSSI (`enableLinkStatus()`) does not appear to be a
+factor either way — present in both safe combinations, absent in the
+unsafe one. **Do not call `enableImu()` and `enableDriveEncoders()` on the
+same connection.**
 
 ---
 
@@ -205,10 +207,12 @@ the BLE connection actually drops.
 Both drive motors have their own built-in rotation encoder, but
 **`connect()` does not subscribe to them** — call `enableDriveEncoders()`
 explicitly if you want this data. (Opt-in for interface consistency with
-`enableImu()`/`enableLinkStatus()`, not because it's risky: this is the
-one telemetry stream that was actually measured — ~264 Hz combined,
-send-on-change TX, wheels suspended — running cleanly alongside driving
-with zero exceptions.)
+`enableImu()`/`enableLinkStatus()`, not because it's risky on its own:
+measured at ~264 Hz combined, send-on-change TX, wheels suspended —
+running cleanly alongside driving with zero exceptions.)
+
+**Do not combine with `enableImu()`** — the two together reliably break
+the BLE connection even though either is safe alone; see "IMU" above.
 
 ```cpp
 struct DriveEncoders {
@@ -341,18 +345,20 @@ even if the command is changing every tick. **The true safe ceiling for a
 command that changes faster than ~1 Hz has not been characterized** —
 only "changes at human/decision-loop pace, ~1x/s or slower" is validated.
 
-**2. Incoming IMU notification volume.** Independently, enabling
-accelerometer/gyroscope notifications (see "IMU" above) — which stream at
-up to ~95 Hz / ~56 Hz while the vehicle is actually moving, from
-mechanical vibration — destabilized the connection even with the write-rate
-fix from (1) already in place and even with every other subscription
-(steering, both drive encoders) left on. This is traffic *from* the hub,
-unrelated to anything the application sends. Mitigation: IMU is opt-in
-(`enableImu()`), not subscribed by `connect()`, and requests a coarser
-notification threshold than the default. **This is not a confirmed
-fix** — see "IMU" above: a follow-up test combining active driving with
-IMU enabled still stalled the connection. Treat IMU as unsafe during
-active driving until this is investigated further.
+**2. IMU combined with drive encoders.** Independently, enabling
+accelerometer/gyroscope notifications (see "IMU" above) *together with*
+drive-encoder notifications — both auto-subscribed at the time this was
+found, before either became opt-in — destabilized the connection even
+with the write-rate fix from (1) already in place. At the time this
+looked like "IMU notification volume" being the culprit on its own, since
+disabling IMU alone fixed it; a coarser delta interval was tried as a
+mitigation and still stalled, which was confusing until properly isolated
+later: **it's specifically IMU + drive encoders together that breaks the
+connection — either one alone, even at its most aggressive notification
+rate, is safe** (see "IMU" above for the isolation tests). RSSI does not
+appear to be a factor. Both are opt-in (`enableImu()` /
+`enableDriveEncoders()`), not subscribed by `connect()`, specifically so
+an application can choose one or the other but must not enable both.
 
 Earlier in development, (1) alone was misdiagnosed as "the LWP3 virtual
 port is unsafe" — differential commands sent through it produced no

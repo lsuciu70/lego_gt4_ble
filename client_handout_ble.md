@@ -337,16 +337,17 @@ changed. Commands are transmitted on change plus a low-rate keepalive —
 see section 12 — not retransmitted at a fixed high frequency.
 
 Two independent hardware issues were found and fixed during development —
-a fixed ~50Hz retransmit rate, and IMU notification volume — both of
-which produced the same symptom ("BLE connection drops during driving").
-Full investigation and the two corrected conclusions from that process are
-in `README.md`; current behavior only, below:
+a fixed ~50Hz retransmit rate, and IMU combined with drive encoders —
+both of which produced the same symptom ("BLE connection drops during
+driving"). Full investigation and the corrected conclusions from that
+process are in `README.md`; current behavior only, below:
 
 - Safe: send-on-change TX + ~1Hz keepalive (section 12). The ceiling for a
   command that changes faster than ~1Hz has NOT been characterized.
-- Not safe during active driving: IMU (`enableImu()`, section 14a) — see
-  that section for current status.
-- Safe alongside driving, measured: steering, drive encoders, RSSI.
+- Safe alongside driving, measured individually: steering, IMU
+  (`enableImu()`, delta=1), drive encoders (`enableDriveEncoders()`), RSSI.
+- **Not safe: IMU and drive encoders enabled together** — reliably breaks
+  the connection even though either is safe alone. See section 14a.
 
 ## Why direct writes are still used for differential commands
 
@@ -552,24 +553,27 @@ The newest sample always replaces older samples.
 bool enableImu();
 ```
 
-Subscribes to the hub's accelerometer/gyroscope. **NOT called
-automatically by `connect()`.** Call this explicitly, after `connect()`,
-only if the application genuinely needs IMU data.
+Subscribes to the hub's accelerometer/gyroscope, delta=1 (report on any
+change). **NOT called automatically by `connect()`** — opt-in for
+interface consistency with the other telemetry streams, not because it's
+risky on its own.
 
-Why opt-in, not automatic: accelerometer/gyroscope notifications stream at
-up to ~95 Hz / ~56 Hz while the vehicle is actually moving (mechanical
-vibration), and that notification volume alone was found to destabilize
-the BLE connection during real driving. Enabling IMU is a deliberate
-trade-off the client opts into, not a free capability.
+**Confirmed safe during active driving — used alone.** Reproduced clean
+over 32s of active driving (alternating virtual-port/direct-port drive
+commands), even though the accelerometer/gyroscope report at up to
+~95 Hz / ~56 Hz from mechanical vibration while actually driving.
 
-**Not confirmed safe during active driving.** `enableImu()` requests a
-coarser delta interval than the default, which reduces but does not
-eliminate the notification volume. A combined drive+IMU test still lost
-the connection with this mitigation in place, silently (no exception —
-telemetry simply stopped updating); root cause undetermined. Treat IMU as
-unsafe during active driving. More likely safe for passive monitoring
-(vehicle stationary, or between drive segments), based on what has
-actually been tested. See `README.md` for the investigation.
+**Not safe combined with `enableDriveEncoders()`.** The two together
+reliably break the BLE connection within seconds of driving — reproduced
+twice, either as a thrown `"Peripheral is not connected"` or a silent
+telemetry freeze. This was initially misdiagnosed as "IMU notification
+volume" being the problem on its own (a coarser delta interval was tried
+as a mitigation and still failed); properly isolated, it's specifically
+the combination that fails, not IMU's own rate. RSSI
+(`enableLinkStatus()`) does not appear to be a factor either way.
+
+**Do not call `enableImu()` and `enableDriveEncoders()` on the same
+connection.** See `README.md` for the full investigation.
 
 Returns:
 
@@ -675,10 +679,13 @@ automatically by `connect()`.** Call this explicitly, after `connect()`,
 before relying on `getDriveEncoders()`.
 
 Why opt-in: for interface consistency with `enableImu()` and
-`enableLinkStatus()` — not because drive encoders are risky. This is the
-one telemetry stream actually measured (~264 Hz combined, send-on-change
-TX, wheels suspended) running cleanly alongside driving with zero
-exceptions.
+`enableLinkStatus()` — not because drive encoders are risky on their own.
+Measured at ~264 Hz combined (send-on-change TX, wheels suspended),
+running cleanly alongside driving with zero exceptions.
+
+**Do not call together with `enableImu()`** — the two reliably break the
+BLE connection when both are active, even though either is safe alone.
+See `enableImu()` above.
 
 Returns:
 
@@ -907,9 +914,9 @@ and must not rely on software-only stop as the sole safety mechanism.
 
 On the stalled-telemetry point: a BLE notification stream can stop
 silently — no exception, the getter just keeps returning the last value
-it ever received (the IMU case in section 14a is a confirmed example, but
-any subscription could in principle do this). The SDK does not detect or
-report this for you. Every telemetry struct (`Telemetry`, `ImuSample`,
+it ever received (the IMU+drive-encoders combination in section 14a is a
+confirmed example, but any subscription could in principle do this). The
+SDK does not detect or report this for you. Every telemetry struct (`Telemetry`, `ImuSample`,
 `LinkStatus`, `DriveEncoders`) carries `timestamp_ns` for exactly this
 reason — a control loop that depends on a given stream should check that
 its timestamp is still advancing, and treat a stream that hasn't updated
@@ -926,7 +933,9 @@ if (!car.connect(address)) return 1;
 if (!car.autoCalibrate() || !car.isReady()) return 1;
 
 // Opt-in telemetry, only what this controller actually needs — see
-// sections 14/14a. IMU is NOT recommended here; see section 14a.
+// sections 14/14a. Do NOT call enableImu() together with
+// enableDriveEncoders(): the two reliably break the connection combined,
+// even though either is safe alone.
 car.enableDriveEncoders();
 car.enableLinkStatus();
 

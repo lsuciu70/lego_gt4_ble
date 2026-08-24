@@ -152,12 +152,12 @@ class PorscheGt4 {
 
     /**
      * @brief Opt-in subscription to the hub's internal accelerometer/gyroscope.
-     * NOT enabled automatically by connect() — the resulting notification
-     * traffic (measured up to ~95Hz/~56Hz while the vehicle is actually in
-     * motion, from mechanical vibration) was found to destabilize the BLE
-     * connection during real driving on this hardware. Call this only if the
-     * application genuinely needs IMU data and can accept that trade-off;
-     * see README.md / client_handout_ble.md for the full finding.
+     * NOT enabled automatically by connect(). Confirmed safe on hardware
+     * during active driving, delta=1, PROVIDED enableDriveEncoders() is
+     * NOT also active: IMU and drive encoders together reliably break the
+     * BLE connection (reproduced twice), while either one alone (even at
+     * its most aggressive notification rate) is safe. RSSI does not appear
+     * to be a factor either way. See README.md / client_handout_ble.md.
      * @return true if the subscription requests were sent successfully.
      */
     bool enableImu();
@@ -195,11 +195,10 @@ class PorscheGt4 {
     /**
      * @brief Opt-in subscription to both drive motors' built-in rotation encoders.
      * NOT enabled automatically by connect() — kept on-request, like enableImu(),
-     * so the application only pays for the telemetry it actually needs. Unlike
-     * enableImu(), this one has been exercised simultaneously with driving in
-     * every hardware test this session (including the ~264Hz combined
-     * measurement) with no observed instability; it is opt-in purely for
-     * interface consistency, not as a safety mitigation.
+     * so the application only pays for the telemetry it actually needs. Safe
+     * alongside driving on its own (confirmed at ~264Hz combined). Do NOT
+     * combine with enableImu(): the two together reliably break the BLE
+     * connection, even though either is safe alone. See enableImu().
      * @return true if the subscription requests were sent successfully.
      */
     bool enableDriveEncoders();
