@@ -342,8 +342,9 @@ both of which produced the same symptom ("BLE connection drops during
 driving"). Full investigation and the corrected conclusions from that
 process are in `README.md`; current behavior only, below:
 
-- Safe: send-on-change TX + ~1Hz keepalive (section 12). The ceiling for a
-  command that changes faster than ~1Hz has NOT been characterized.
+- Safe: send-on-change TX with independent steer/throttle floors (section
+  12) — characterized: steer safe to >=100Hz, throttle safe to 5-10Hz
+  depending on path. Port-mode switch rate itself is NOT a factor.
 - Safe alongside driving, measured individually: steering, IMU
   (`enableImu()`, delta=1), drive encoders (`enableDriveEncoders()`), RSSI.
 - **Not safe: IMU and drive encoders enabled together** — reliably breaks
@@ -436,42 +437,44 @@ The SDK does NOT retransmit at a fixed high frequency. It uses send-on-
 change plus a low-rate keepalive — see section 9a for why (a fixed ~50 Hz
 retransmit reliably dropped the BLE connection).
 
-Behavior:
+**Steering and throttle are gated independently**, with separate floors,
+because they tolerate very different continuous-change rates (see below):
 
 ```text
 Command changed since last transmit?
-  -> sent immediately (bounded by a small floor, currently 50ms,
-     even if the value is changing every tick)
+  -> sent immediately, bounded by that channel's own floor:
+       steer:    15ms (~67Hz) default
+       throttle: 200ms (5Hz) default
 
 Command unchanged since last transmit?
   -> resent at most once per keepalive interval (currently 1s)
 ```
 
 Clients can still call `sendCommand()` as often as they like (e.g. every
-control tick at 50 Hz) — the HAL decides internally whether that actually
-produces a BLE transmission. Calling it often with an unchanged value is
-cheap and expected; it is NOT the same as commanding a fast BLE write rate.
+control tick at 50 Hz, changing steer and throttle together) — the HAL
+decides internally, per channel, whether that actually produces a BLE
+transmission. Calling it often with an unchanged value is cheap and
+expected; it is NOT the same as commanding a fast BLE write rate.
 
-Validated on hardware:
-
-```text
-Command sent once, never repeated           -> reliable (20s test)
-Command repeated at ~1 Hz                    -> reliable (20s test)
-Command changing at human/decision pace
-  (~4s between changes in testing)           -> reliable (32s test)
-```
-
-NOT validated:
+**Validated on hardware, via a dedicated sweep** (isolating change-rate
+from port-mode switching):
 
 ```text
-Command changing continuously faster than ~1 Hz
-  (e.g. a closed-loop controller adjusting steering every tick)
+Steer changing continuously, throttle constant   -> safe to >=100Hz
+                                                     (top of what was tested)
+Throttle changing continuously, virtual port      -> safe to 10Hz, broke by 20Hz
+Throttle changing continuously, direct writes     -> safe to 5Hz, broke by 10Hz
+Port-mode switch rate itself (isolated from        -> NOT the cause; same break
+  value-change rate, held at a fixed safe 10Hz)       threshold either way
+Steer + throttle both changing, up to 100Hz        -> safe WITH the independent
+  attempted, mixing virtual/direct                    floors above in place
 ```
 
-If your application needs updates faster than ~1 Hz on a value that is
-genuinely changing that often (not just being re-sent unchanged), test
-that specific pattern before relying on it — see section 9a for the full
-background this recommendation comes from.
+The defaults above sit at (steer) or at the safe boundary of (throttle)
+these measured ceilings. If you override `steer_rate_limit_ms` /
+`throttle_rate_limit_ms` in `config/gt4.conf` (section 14b) to go faster,
+you are past validated territory and should retest that specific pattern
+on hardware — see section 9a for the full background.
 
 ---
 
@@ -751,8 +754,9 @@ the project, `config/gt4.conf`:
 ```text
 # key=value, one per line. '#' starts a comment.
 mac_address=28:3C:90:9C:82:14
-imu_delta=10
-tx_rate_limit_ms=50
+imu_delta=1
+steer_rate_limit_ms=15
+throttle_rate_limit_ms=200
 keepalive_interval_ms=1000
 epsilon_deg=3.0
 stall_max_sweep_ms=1500
@@ -955,17 +959,16 @@ std::_Exit(0);  // see section 8b — not `return 0`
 Recommended call frequency for `sendCommand()`: 50 Hz. Calling it that
 often is expected and fine even though the HAL does not transmit at 50 Hz
 internally — see section 12. The actual BLE write rate is decided by the
-HAL (send-on-change + ~1Hz keepalive), not by how often the client calls
-`sendCommand()`.
+HAL, per channel, not by how often the client calls `sendCommand()`.
 
-**Caveat that matters for this exact loop:** section 12's "safe ceiling
-not characterized" applies here directly. If `controller.compute()`
-produces a genuinely different `cmd` on every tick (e.g. continuous
-closed-loop steering correction, not just periodic re-sends of an
-unchanged value), that drives BLE writes faster than the ~1Hz pattern
-that has actually been validated on hardware. Test that specific
-behavior — a continuously-changing command, not a periodically-resent
-one — before relying on it in this loop.
+**If `controller.compute()` produces a genuinely different `cmd` on every
+tick** (not just periodic re-sends of an unchanged value): steering
+corrections can go as fast as this loop calls them (validated safe to
+>=100Hz) with no special care needed. Continuous *throttle* changes are
+internally capped at 200ms/5Hz (`throttle_rate_limit_ms`, section 12) —
+safe by design even if `controller.compute()` changes throttle every
+tick, but be aware the vehicle will only actually respond to a new
+throttle target up to 5 times per second, not 50.
 
 ---
 

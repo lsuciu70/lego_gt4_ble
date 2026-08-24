@@ -47,8 +47,10 @@ Config loadConfig() {
                 cfg.mac_address = value;
             } else if (key == "imu_delta") {
                 cfg.imu_delta = static_cast<uint8_t>(std::stoul(value));
-            } else if (key == "tx_rate_limit_ms") {
-                cfg.tx_rate_limit_ms = std::stoull(value);
+            } else if (key == "steer_rate_limit_ms") {
+                cfg.steer_rate_limit_ms = std::stoull(value);
+            } else if (key == "throttle_rate_limit_ms") {
+                cfg.throttle_rate_limit_ms = std::stoull(value);
             } else if (key == "keepalive_interval_ms") {
                 cfg.keepalive_interval_ms = std::stoull(value);
             } else if (key == "epsilon_deg") {

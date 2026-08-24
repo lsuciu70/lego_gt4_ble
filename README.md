@@ -278,8 +278,9 @@ file at a fixed location in the project, `config/gt4.conf`:
 ```text
 # key=value, one per line. '#' starts a comment.
 mac_address=28:3C:90:9C:82:14
-imu_delta=10
-tx_rate_limit_ms=50
+imu_delta=1
+steer_rate_limit_ms=15
+throttle_rate_limit_ms=200
 keepalive_interval_ms=1000
 epsilon_deg=3.0
 stall_max_sweep_ms=1500
@@ -340,10 +341,32 @@ command value was actually changing. A command sent once and never
 repeated, or repeated at ~1 Hz, was reliable over many repeated hardware
 tests (15-32s each). Fix: `txLoop()` now sends a command immediately when
 it changes, and otherwise repeats the last command at most once per
-`_keepaliveIntervalNs` (1s), with a small floor (`_txRateLimitNs`, 50ms)
-even if the command is changing every tick. **The true safe ceiling for a
-command that changes faster than ~1 Hz has not been characterized** —
-only "changes at human/decision-loop pace, ~1x/s or slower" is validated.
+`_keepaliveIntervalNs` (1s).
+
+**The continuous-change ceiling has since been characterized** by a
+dedicated hardware sweep (isolating value-change rate from port-mode
+switching), with a clear and initially counter-intuitive result:
+steering and throttle have very different safe ceilings, so `txLoop()`
+now gates them with **independent floors** instead of one shared one.
+
+- A genuinely changing **steer** value was safe up to at least 100 Hz —
+  the top of what was swept; the true ceiling may be higher. Default
+  floor: `_steerRateLimitNs`, 15 ms (~67 Hz), comfortably inside that.
+- A genuinely changing **throttle** value was far more fragile: safe at
+  10 Hz / broke by 20 Hz via the virtual port (symmetric), and safe at
+  5 Hz / broke by 10 Hz via direct dual-writes (differential) — roughly
+  matching the 2-vs-3-packets-per-write difference between the two paths.
+  Default floor: `_throttleRateLimitNs`, 200 ms (5 Hz), at the safe
+  boundary for the worse (differential) case.
+- **Port-mode switching frequency is NOT the cause** — a control test
+  that fixed the virtual/direct switch rate at a known-safe 10 Hz while
+  sweeping steer-rate independently broke at the same threshold as
+  switching freely, ruling that out. It's specifically how often the
+  throttle *value* changes.
+- Validated end-to-end: a caller driving both steer and throttle as fast
+  as it likes (tested up to 100 Hz of attempted changes, alternating
+  symmetric/differential) completed cleanly — the independent floors
+  protect the connection even from an aggressive/naive caller.
 
 **2. IMU combined with drive encoders.** Independently, enabling
 accelerometer/gyroscope notifications (see "IMU" above) *together with*

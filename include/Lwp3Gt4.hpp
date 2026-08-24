@@ -266,19 +266,20 @@ class PorscheGt4 {
     // Transmission gating: send-on-change + low-rate keepalive, not a fixed
     // high-frequency retransmit. Sustained ~50Hz retransmission (regardless
     // of whether values were actually changing) was found to reliably drop
-    // the BLE connection within 1-2s on this hardware; a command that is
-    // sent once and never repeated, or repeated at ~1Hz, was reliable over
-    // repeated 15-32s hardware tests. A genuine change is sent right away
-    // (only bounded by the small floor below); an unchanged command is
-    // repeated at most once per _keepaliveIntervalNs. This matches how a
-    // real operator/controller behaves — the command value itself changes
-    // at human/decision-loop pace (not faster than ~1x/s in practice), so
-    // the floor is just a cheap backstop, not the thing doing the real work.
-    // The true safe ceiling for a command that changes on EVERY control
-    // tick (e.g. continuous steering correction faster than ~1Hz) has NOT
-    // been characterized.
-    std::atomic<TimestampNs> _lastTxTime{0};
-    uint64_t _txRateLimitNs;      // Floor even if changing every tick. From Config::tx_rate_limit_ms.
+    // the BLE connection within 1-2s on this hardware. Steering and
+    // throttle are gated INDEPENDENTLY, each with its own floor, because
+    // hardware testing found they tolerate very different continuous-change
+    // rates: a genuinely changing steer value was safe up to at least
+    // 100Hz (the top of what was tested), while a genuinely changing
+    // throttle value broke the connection by 20Hz (virtual port, symmetric)
+    // or by 10Hz (direct dual-write, differential) — confirmed to be about
+    // the throttle value itself changing, not which port or how often the
+    // port mode switches (isolated and ruled out separately). See
+    // README.md "Drive Architecture" for the full characterization.
+    std::atomic<TimestampNs> _lastSteerTxTime{0};
+    std::atomic<TimestampNs> _lastThrottleTxTime{0};
+    uint64_t _steerRateLimitNs;     // From Config::steer_rate_limit_ms.
+    uint64_t _throttleRateLimitNs;  // From Config::throttle_rate_limit_ms.
     uint64_t _keepaliveIntervalNs;  // Keepalive when unchanged. From Config::keepalive_interval_ms.
 
     // Loaded once at construction; see Lwp3Config.hpp for fallback behavior

@@ -18,8 +18,16 @@ namespace LWP3 {
  */
 struct Config {
     std::string mac_address = "28:3C:90:9C:82:14";
-    uint8_t imu_delta = 10;
-    uint64_t tx_rate_limit_ms = 50;
+    // delta=1 confirmed safe when IMU is used WITHOUT drive encoders active
+    // at the same time; the two together reliably break the connection.
+    uint8_t imu_delta = 1;
+    // Steering and throttle are gated independently: hardware testing found
+    // a genuinely changing steer value safe up to at least 100Hz, while a
+    // genuinely changing throttle value broke the connection by 20Hz
+    // (virtual port) or 10Hz (direct writes). See README.md "Drive
+    // Architecture" for the full characterization.
+    uint64_t steer_rate_limit_ms = 15;
+    uint64_t throttle_rate_limit_ms = 200;
     uint64_t keepalive_interval_ms = 1000;
     float epsilon_deg = 3.0f;
     uint32_t stall_max_sweep_ms = 1500;

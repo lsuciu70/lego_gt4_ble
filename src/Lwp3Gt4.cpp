@@ -14,7 +14,8 @@ namespace LWP3 {
 PorscheGt4::PorscheGt4() {
     _config = loadConfig();
     _epsilon = _config.epsilon_deg;
-    _txRateLimitNs = _config.tx_rate_limit_ms * 1'000'000ULL;
+    _steerRateLimitNs = _config.steer_rate_limit_ms * 1'000'000ULL;
+    _throttleRateLimitNs = _config.throttle_rate_limit_ms * 1'000'000ULL;
     _keepaliveIntervalNs = _config.keepalive_interval_ms * 1'000'000ULL;
     _latencySamples.reserve(100);
 }
@@ -129,13 +130,19 @@ void PorscheGt4::setupHandshake() {
 }
 
 void PorscheGt4::txLoop(std::stop_token st) {
-    // Send-on-change + low-rate keepalive. NOT a fixed high-frequency
-    // retransmit — see the comment on _txRateLimitNs/_keepaliveIntervalNs in
-    // the header and client_handout_ble.md section 9a. `lastSent` is plain
-    // (non-atomic) local state: only this thread ever reads or writes it.
-    Command lastSent{0, 0, 0};
-    bool hasSentOnce = false;   // true after the first SUCCESSFUL transmission (change baseline)
-    bool hasAttempted = false;  // true after the first attempt, success or failure (rate-floor gate)
+    // Send-on-change + low-rate keepalive, with steering and throttle
+    // gated INDEPENDENTLY — see the comment on _steerRateLimitNs /
+    // _throttleRateLimitNs in the header for why (hardware testing found
+    // very different safe continuous-change rates for the two). All local
+    // state below: only this thread ever reads or writes it.
+    int32_t lastSentSteer = 0;
+    bool steerSentOnce = false;   // true after the first SUCCESSFUL steer transmission
+    bool steerAttempted = false;  // true after the first attempt, success or failure (rate-floor gate)
+
+    int32_t lastSentLeft = 0;
+    int32_t lastSentRight = 0;
+    bool throttleSentOnce = false;
+    bool throttleAttempted = false;
 
     while (!st.stop_requested()) {
         std::unique_lock lock(_txMtx);
@@ -149,62 +156,70 @@ void PorscheGt4::txLoop(std::stop_token st) {
 
         if (!_isCalibrated.load() || _virtualDrivePort.load() == 0xFF) continue;
 
-        bool changed = !hasSentOnce || target.steer != lastSent.steer ||
-                       target.throttle_left != lastSent.throttle_left ||
-                       target.throttle_right != lastSent.throttle_right;
-        bool keepaliveDue = (now - _lastTxTime.load()) >= _keepaliveIntervalNs;
-        if (!changed && !keepaliveDue) continue;
-        // Safety floor even if the command is changing every tick (e.g. a
-        // continuous steering correction) — see header comment: the safe
-        // ceiling for that case is untested, this is a conservative guess.
-        // Gated on hasAttempted (not hasSentOnce) so this floor also applies
-        // while every attempt is failing (e.g. a dropped connection) —
-        // otherwise a run of failures never sets hasSentOnce, "changed"
-        // stays permanently true, and this check would never fire.
-        if (hasAttempted && (now - _lastTxTime.load()) < _txRateLimitNs) continue;
-
-        // Record the attempt time (not just successes) BEFORE writing, so a
-        // failing connection still gets throttled by the floor/keepalive
-        // gates above instead of retrying on every subsequent wake — a
-        // stale _lastTxTime after a failed write previously reopened both
-        // gates immediately, causing a ~50Hz retry storm during an outage.
-        _lastTxTime.store(now);
-        hasAttempted = true;
-
-        try {
-            auto left = static_cast<int8_t>(target.throttle_left);
-            auto right = static_cast<int8_t>(target.throttle_right);
-
-            if (left == right) {
-                // Symmetric: single atomic packet via the virtual port.
-                porsche.write_command(SERVICE_UUID, CHAR_UUID, buildDriveCmd(left, right));
-            } else {
-                // Differential: direct writes, but ALWAYS both motors
-                // together, even though only one value may have changed.
-                // Confirmed on hardware: writing just one physical motor
-                // port while the pair is still grouped under the virtual
-                // port (created at connect(), see setupHandshake()) stops
-                // the untouched motor too, as if the hub treats a lone
-                // write as breaking synchronization within the group.
+        // --- Steering channel ---
+        bool steerChanged = !steerSentOnce || target.steer != lastSentSteer;
+        bool steerKeepaliveDue = (now - _lastSteerTxTime.load()) >= _keepaliveIntervalNs;
+        // Gated on steerAttempted (not steerSentOnce) so the floor also
+        // applies while every attempt is failing (e.g. a dropped
+        // connection) — see the txLoop retry-storm fix history.
+        if ((steerChanged || steerKeepaliveDue) &&
+            (!steerAttempted || (now - _lastSteerTxTime.load()) >= _steerRateLimitNs)) {
+            _lastSteerTxTime.store(now);
+            steerAttempted = true;
+            try {
                 porsche.write_command(SERVICE_UUID, CHAR_UUID,
-                                      buildSingleDriveCmd(PORT_DRIVE_L, static_cast<int8_t>(-left)));
-                porsche.write_command(SERVICE_UUID, CHAR_UUID,
-                                      buildSingleDriveCmd(PORT_DRIVE_R, right));
+                                      buildSteerCmd(hardwareCenter + target.steer));
+                lastSentSteer = target.steer;
+                steerSentOnce = true;
+
+                // Record for Epsilon Matching
+                std::lock_guard<std::mutex> sLock(_statsMtx);
+                _inflight.push_back({target.steer, now});
+                if (_inflight.size() > 20) _inflight.erase(_inflight.begin());
+            } catch (const std::exception& e) {
+                std::cerr << "[txLoop] steer write_command threw: " << e.what() << "\n" << std::flush;
+            } catch (...) {
+                std::cerr << "[txLoop] steer write_command threw non-std exception\n" << std::flush;
             }
-            porsche.write_command(SERVICE_UUID, CHAR_UUID,
-                                  buildSteerCmd(hardwareCenter + target.steer));
+        }
 
-            lastSent = target;
-            hasSentOnce = true;
+        // --- Throttle/drive channel ---
+        bool throttleChanged = !throttleSentOnce || target.throttle_left != lastSentLeft ||
+                                target.throttle_right != lastSentRight;
+        bool throttleKeepaliveDue = (now - _lastThrottleTxTime.load()) >= _keepaliveIntervalNs;
+        if ((throttleChanged || throttleKeepaliveDue) &&
+            (!throttleAttempted || (now - _lastThrottleTxTime.load()) >= _throttleRateLimitNs)) {
+            _lastThrottleTxTime.store(now);
+            throttleAttempted = true;
+            try {
+                auto left = static_cast<int8_t>(target.throttle_left);
+                auto right = static_cast<int8_t>(target.throttle_right);
 
-            // Record for Epsilon Matching
-            std::lock_guard<std::mutex> sLock(_statsMtx);
-            _inflight.push_back({target.steer, now});
-            if (_inflight.size() > 20) _inflight.erase(_inflight.begin());
-        } catch (const std::exception& e) {
-            std::cerr << "[txLoop] write_command threw: " << e.what() << "\n" << std::flush;
-        } catch (...) {
-            std::cerr << "[txLoop] write_command threw non-std exception\n" << std::flush;
+                if (left == right) {
+                    // Symmetric: single atomic packet via the virtual port.
+                    porsche.write_command(SERVICE_UUID, CHAR_UUID, buildDriveCmd(left, right));
+                } else {
+                    // Differential: direct writes, but ALWAYS both motors
+                    // together, even though only one value may have changed.
+                    // Confirmed on hardware: writing just one physical motor
+                    // port while the pair is still grouped under the virtual
+                    // port (created at connect(), see setupHandshake()) stops
+                    // the untouched motor too, as if the hub treats a lone
+                    // write as breaking synchronization within the group.
+                    porsche.write_command(SERVICE_UUID, CHAR_UUID,
+                                          buildSingleDriveCmd(PORT_DRIVE_L, static_cast<int8_t>(-left)));
+                    porsche.write_command(SERVICE_UUID, CHAR_UUID,
+                                          buildSingleDriveCmd(PORT_DRIVE_R, right));
+                }
+
+                lastSentLeft = target.throttle_left;
+                lastSentRight = target.throttle_right;
+                throttleSentOnce = true;
+            } catch (const std::exception& e) {
+                std::cerr << "[txLoop] throttle write_command threw: " << e.what() << "\n" << std::flush;
+            } catch (...) {
+                std::cerr << "[txLoop] throttle write_command threw non-std exception\n" << std::flush;
+            }
         }
     }
 
