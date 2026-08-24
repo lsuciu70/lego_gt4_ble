@@ -19,6 +19,8 @@
 #include <thread>
 #include <vector>
 
+#include "Lwp3Config.hpp"
+
 namespace LWP3 {
 
 using TimestampNs = uint64_t;
@@ -234,7 +236,7 @@ class PorscheGt4 {
     std::mutex _statsMtx;
     std::vector<TxRecord> _inflight;
     std::vector<float> _latencySamples;
-    const float _epsilon = 3.0f;  // Degrees of mechanical play/slop.
+    float _epsilon;  // Degrees of mechanical play/slop. From Config::epsilon_deg.
 
     // Transmission gating: send-on-change + low-rate keepalive, not a fixed
     // high-frequency retransmit. Sustained ~50Hz retransmission (regardless
@@ -251,8 +253,12 @@ class PorscheGt4 {
     // tick (e.g. continuous steering correction faster than ~1Hz) has NOT
     // been characterized.
     std::atomic<TimestampNs> _lastTxTime{0};
-    const uint64_t _txRateLimitNs = 50'000'000;      // 50ms floor even if changing every tick.
-    const uint64_t _keepaliveIntervalNs = 1'000'000'000;  // 1s keepalive when unchanged.
+    uint64_t _txRateLimitNs;      // Floor even if changing every tick. From Config::tx_rate_limit_ms.
+    uint64_t _keepaliveIntervalNs;  // Keepalive when unchanged. From Config::keepalive_interval_ms.
+
+    // Loaded once at construction; see Lwp3Config.hpp for fallback behavior
+    // (missing file or key silently keeps the compiled-in default).
+    Config _config;
 
     /** @brief The high-priority TX loop handling dual-packet LWP3 dispatches. */
     void txLoop(std::stop_token st);

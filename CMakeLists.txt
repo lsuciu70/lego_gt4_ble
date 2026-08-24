@@ -8,8 +8,11 @@ find_package(simpleble REQUIRED)
 find_package(Threads REQUIRED)
 
 # SDK Library
-add_library(lwp3gt4 src/Lwp3Gt4.cpp)
+add_library(lwp3gt4 src/Lwp3Gt4.cpp src/Lwp3Config.cpp)
 target_include_directories(lwp3gt4 PUBLIC include)
+# Absolute path so config/gt4.conf is found regardless of the working
+# directory the binary is run from.
+target_compile_definitions(lwp3gt4 PRIVATE GT4_CONFIG_PATH="${CMAKE_SOURCE_DIR}/config/gt4.conf")
 
 # --- THE FIX IS HERE ---
 # We link atomic so the compiler can handle the 16-byte Telemetry struct

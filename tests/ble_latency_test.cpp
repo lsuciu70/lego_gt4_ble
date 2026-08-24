@@ -2,11 +2,12 @@
 #include <iostream>
 #include <thread>
 
+#include "Lwp3Config.hpp"
 #include "Lwp3Gt4.hpp"
 
 int main(int argc, char** argv) {
     LWP3::PorscheGt4 car;
-    if (!car.connect("28:3C:90:9C:82:14")) return 1;
+    if (!car.connect(LWP3::loadConfig().mac_address)) return 1;
     car.autoCalibrate();
 
     std::cout << "Profiling physical latency (20 cycles)..." << std::endl;

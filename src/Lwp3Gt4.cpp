@@ -12,6 +12,10 @@ using namespace std::chrono_literals;
 namespace LWP3 {
 
 PorscheGt4::PorscheGt4() {
+    _config = loadConfig();
+    _epsilon = _config.epsilon_deg;
+    _txRateLimitNs = _config.tx_rate_limit_ms * 1'000'000ULL;
+    _keepaliveIntervalNs = _config.keepalive_interval_ms * 1'000'000ULL;
     _latencySamples.reserve(100);
 }
 
@@ -316,10 +320,10 @@ int32_t PorscheGt4::sweep_to_limit(int8_t speed) {
     porsche.write_command(SERVICE_UUID, CHAR_UUID,
                           {0x07, 0x00, 0x81, 0x34, 0x11, 0x01, static_cast<uint8_t>(speed)});
 
-    constexpr auto kMaxSweepDuration = 1500ms;  // hard safety ceiling
-    constexpr auto kPollInterval = 50ms;
-    constexpr auto kStallWindow = 200ms;  // no meaningful movement for this long => stalled
-    constexpr int32_t kStallEpsilonRaw = 2;
+    const auto kMaxSweepDuration = std::chrono::milliseconds(_config.stall_max_sweep_ms);  // hard safety ceiling
+    const auto kPollInterval = std::chrono::milliseconds(_config.stall_poll_ms);
+    const auto kStallWindow = std::chrono::milliseconds(_config.stall_window_ms);  // no meaningful movement for this long => stalled
+    const int32_t kStallEpsilonRaw = _config.stall_epsilon_raw;
 
     std::this_thread::sleep_for(150ms);  // let it get moving before checking for stall
     auto start = std::chrono::steady_clock::now();
@@ -367,7 +371,7 @@ bool PorscheGt4::enableImu() {
     // UNSAFE to rely on during active driving until this is investigated
     // further — see README.md "IMU" section.
 
-    constexpr uint8_t kImuDelta = 10;
+    const uint8_t kImuDelta = _config.imu_delta;
     try {
         porsche.write_command(
             SERVICE_UUID, CHAR_UUID,

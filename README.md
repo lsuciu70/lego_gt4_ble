@@ -263,6 +263,44 @@ struct LatencyStats {
 
 ---
 
+# Configuration
+
+Tuning knobs (delta intervals, TX rate/keepalive timing, epsilon-matching
+tolerance, stall-detection thresholds) and the hub's MAC address have
+compiled-in defaults, matching the values validated on hardware throughout
+this SDK's development. They can optionally be overridden from a plain-text
+file at a fixed location in the project, `config/gt4.conf`:
+
+```text
+# key=value, one per line. '#' starts a comment.
+mac_address=28:3C:90:9C:82:14
+imu_delta=10
+tx_rate_limit_ms=50
+keepalive_interval_ms=1000
+epsilon_deg=3.0
+stall_max_sweep_ms=1500
+stall_poll_ms=50
+stall_window_ms=200
+stall_epsilon_raw=2
+```
+
+The file is entirely optional. If it's missing, or a key inside it is
+missing or fails to parse, that field silently falls back to its
+compiled-in default — never a hard error. Unknown keys are ignored, so
+adding new tunable fields later won't break an existing config file.
+
+This deliberately does NOT include protocol constants (BLE UUIDs, LWP3
+port IDs, message opcodes, in `Lwp3Constants.hpp`) — those are hardware
+facts, not configuration, and stay compile-time.
+
+`PorscheGt4`'s constructor loads this file once (via `LWP3::loadConfig()`
+from `Lwp3Config.hpp`) and applies the tuning values internally.
+`examples/` and `tests/` also call `LWP3::loadConfig().mac_address`
+directly for `connect()`, so the hub's MAC address only needs to be
+edited in one place.
+
+---
+
 # Public API
 
 ## Command

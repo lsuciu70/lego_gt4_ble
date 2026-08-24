@@ -2,12 +2,13 @@
 #include <iostream>
 #include <thread>
 
+#include "../include/Lwp3Config.hpp"
 #include "../include/Lwp3Gt4.hpp"
 
 using namespace std::chrono_literals;
 
 int main(int argc, char** argv) {
-    std::string mac = (argc > 1) ? argv[1] : "28:3C:90:9C:82:14";
+    std::string mac = (argc > 1) ? argv[1] : LWP3::loadConfig().mac_address;
     LWP3::PorscheGt4 car;
 
     if (!car.connect(mac)) return 1;

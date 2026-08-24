@@ -744,6 +744,45 @@ closed loop.
 
 ---
 
+# 14b. Configuration File
+
+Tuning knobs and the hub's MAC address have compiled-in defaults, matching
+the values validated on hardware throughout this document's history. They
+can optionally be overridden from a plain-text file at a fixed location in
+the project, `config/gt4.conf`:
+
+```text
+# key=value, one per line. '#' starts a comment.
+mac_address=28:3C:90:9C:82:14
+imu_delta=10
+tx_rate_limit_ms=50
+keepalive_interval_ms=1000
+epsilon_deg=3.0
+stall_max_sweep_ms=1500
+stall_poll_ms=50
+stall_window_ms=200
+stall_epsilon_raw=2
+```
+
+The file is entirely optional. A missing file, or a missing/malformed
+value for a given key, silently falls back to that field's compiled-in
+default — never a hard error. Unknown keys are ignored (forward
+compatible with future tunable fields).
+
+**What's excluded on purpose:** protocol constants — BLE UUIDs, LWP3 port
+IDs, message opcodes, defined in `Lwp3Constants.hpp` — are hardware facts,
+not configuration, and are NOT part of this file. Making them
+"configurable" would misleadingly imply they could vary; they can't, for a
+fixed hub model.
+
+`PorscheGt4`'s constructor calls `LWP3::loadConfig()` (declared in
+`Lwp3Config.hpp`) once and applies the tuning fields internally.
+`examples/` and `tests/` also read `mac_address` from the same call for
+`connect()`, so the hub's MAC address needs editing in exactly one place,
+not once per file.
+
+---
+
 # 15. Latency Measurement
 
 ## getLatencyStats()
