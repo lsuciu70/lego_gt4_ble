@@ -48,7 +48,7 @@ Those belong in higher software layers.
 
 # Architecture
 
-The SDK uses a dedicated transmission thread and lock-free state latches.
+The SDK uses a dedicated transmission thread and atomic state latches (lock-free where the platform's `std::atomic` support allows it).
 
 ```text
 Application
@@ -126,7 +126,7 @@ struct Telemetry {
 };
 ```
 
-Values are available through a lock-free latch.
+Values are available through an atomic latch (lock-free on platforms/builds where `std::atomic<Telemetry>` is natively lock-free; otherwise backed by libatomic).
 
 ---
 

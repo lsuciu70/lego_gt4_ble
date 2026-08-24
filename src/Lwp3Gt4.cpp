@@ -40,15 +40,23 @@ bool PorscheGt4::connect(std::string_view address) {
         }
     }
 
-    if (found) {
+    if (!found) return false;
+
+    try {
         porsche.connect();
         std::this_thread::sleep_for(1s);
         setupHandshake();
-        _running = true;
-        _txThread = std::jthread([this](std::stop_token st) { txLoop(st); });
-        return true;
+    } catch (...) {
+        try {
+            porsche.disconnect();
+        } catch (...) {
+        }
+        return false;
     }
-    return false;
+
+    _running = true;
+    _txThread = std::jthread([this](std::stop_token st) { txLoop(st); });
+    return true;
 }
 
 void PorscheGt4::setupHandshake() {
@@ -59,7 +67,7 @@ void PorscheGt4::setupHandshake() {
             std::memcpy(&val, &raw[4], sizeof(int32_t));
             updateTelemetry(val, getNowNs());
         }
-        if (raw[2] == 0x04 && raw[4] == 0x02) {
+        if (data.size() >= 5 && raw[2] == 0x04 && raw[4] == 0x02) {
             _virtualDrivePort.store(raw[3]);
         }
     });
@@ -178,13 +186,18 @@ bool PorscheGt4::autoCalibrate() {
     for (int i = 0; i < 30 && !_telemetryActive.load(); i++) std::this_thread::sleep_for(100ms);
     if (!_telemetryActive.load()) return false;
 
-    int32_t init = _rawSteerPos.load();
-    int32_t rawL = sweep_to_limit(-20);
-    sendReliable(buildSteerCmd(init));
-    int32_t rawR = sweep_to_limit(20);
+    try {
+        int32_t init = _rawSteerPos.load();
+        int32_t rawL = sweep_to_limit(-20);
+        sendReliable(buildSteerCmd(init));
+        int32_t rawR = sweep_to_limit(20);
 
-    hardwareCenter = (rawL + rawR) / 2;
-    sendReliable(buildSteerCmd(hardwareCenter));
+        hardwareCenter = (rawL + rawR) / 2;
+        sendReliable(buildSteerCmd(hardwareCenter));
+    } catch (...) {
+        return false;
+    }
+
     _isCalibrated.store(true);
     return true;
 }
@@ -210,7 +223,26 @@ bool PorscheGt4::isReady() const noexcept {
 }
 void PorscheGt4::disconnect() {
     _running = false;
-    porsche.disconnect();
+
+    // Stop and join the TX thread before touching `porsche`, so the background
+    // thread can't race with disconnect()/a subsequent connect() re-assigning it.
+    if (_txThread.joinable()) {
+        _txThread.request_stop();
+        _txCv.notify_one();
+        _txThread.join();
+    }
+
+    try {
+        porsche.disconnect();
+    } catch (...) {
+    }
+
+    // A fresh connect() always requires a fresh calibration: the physical
+    // rig (or the hub) may have changed between sessions.
+    _isCalibrated.store(false);
+    _virtualDrivePort.store(0xFF);
+    _telemetryActive.store(false);
+    hardwareCenter = 0;
 }
 
 }  // namespace LWP3
