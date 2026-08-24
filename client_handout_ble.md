@@ -25,6 +25,8 @@ The SDK provides:
 - Steering telemetry
 - Raw IMU telemetry (accelerometer + gyroscope, from the hub's internal sensors)
 - BLE link status (RSSI)
+- Drive-encoder telemetry (per-wheel rotation ticks)
+- Independent left/right throttle (symmetric driving verified; see section 9a for a known differential-drive limitation)
 - Physical latency measurements
 
 The SDK does NOT provide:
@@ -117,7 +119,7 @@ if (!car.isReady())
     return false;
 }
 
-car.sendCommand({0, 30});
+car.sendCommand({0, 30, 30});
 
 auto telemetry = car.getLatestTelemetry();
 
@@ -239,7 +241,8 @@ sessions, so a stale calibration must never be reused silently.
 struct Command
 {
     int32_t steer;
-    int32_t throttle;
+    int32_t throttle_left;
+    int32_t throttle_right;
 };
 ```
 
@@ -265,7 +268,7 @@ Values outside this range should be considered invalid.
 
 ---
 
-## Throttle
+## Throttle (throttle_left / throttle_right)
 
 Range:
 
@@ -273,13 +276,45 @@ Range:
 -100 ... +100
 ```
 
-Interpretation:
+Interpretation, per wheel:
 
 ```text
 -100 = maximum reverse
    0 = stop
 +100 = maximum forward
 ```
+
+The SDK corrects for the mirrored motor mounting internally, so positive
+always means "forward" on both sides.
+
+For straight-line driving, set `throttle_left == throttle_right`.
+
+---
+
+# 9a. Differential Drive (KNOWN LIMITATION)
+
+The API and the underlying LWP3 virtual port accept independent
+`throttle_left` / `throttle_right` values.
+
+Verified on hardware:
+
+```text
+throttle_left == throttle_right   -> both wheels drive, encoders confirm motion
+```
+
+NOT yet working, verified on hardware:
+
+```text
+throttle_left == -throttle_right  -> NO wheel movement observed
+                                      (e.g. {0, 30, -30} for an in-place turn)
+```
+
+The drive motors' virtual port may have a firmware-level constraint that
+limits it to symmetric/mirrored motion. This has not been root-caused.
+
+Until this is investigated further, clients should treat differential
+(opposite-sign) throttle values as unsupported, even though the API accepts
+them without error.
 
 ---
 
@@ -292,9 +327,9 @@ The SDK does not queue commands.
 Example:
 
 ```cpp
-sendCommand({10,0});
-sendCommand({20,0});
-sendCommand({30,0});
+sendCommand({10,0,0});
+sendCommand({20,0,0});
+sendCommand({30,0,0});
 ```
 
 Only the latest command is guaranteed to be transmitted.
@@ -303,7 +338,7 @@ Result:
 
 ```text
 Vehicle receives:
-{30,0}
+{30,0,0}
 ```
 
 This behavior is intentional.
@@ -499,6 +534,42 @@ Detect a degrading BLE link (falling RSSI, or `timestamp_ns` not advancing)
 and stop the vehicle proactively, before the connection actually drops.
 The SDK does not do this automatically — no hidden control policy, same
 design principle as everywhere else in this document.
+
+---
+
+## getDriveEncoders()
+
+```cpp
+DriveEncoders getDriveEncoders() const;
+```
+
+```cpp
+struct DriveEncoders
+{
+    int32_t left_ticks;
+    int32_t right_ticks;
+    TimestampNs timestamp_ns;
+};
+```
+
+Source:
+
+Each drive motor's own built-in rotation encoder (LWP3 mode 2 / POS).
+
+Sign convention:
+
+Positive-going ticks mean "forward" on that wheel, matching
+`Command::throttle_left/throttle_right`.
+
+Units:
+
+Raw encoder ticks. No ticks-per-revolution or wheel-circumference scaling
+is applied — that mapping is the client's responsibility.
+
+Verification status:
+
+Confirmed correct on hardware for symmetric (straight-line) driving. See
+section 9a for the differential-drive limitation.
 
 ---
 

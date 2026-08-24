@@ -24,11 +24,11 @@ int main(int argc, char** argv) {
         float t = i * 0.02f;
         int32_t steer = static_cast<int32_t>(45.0f * std::sin(t * 3.5f));
 
-        car.sendCommand({steer, 35});
+        car.sendCommand({steer, 35, 35});
         std::this_thread::sleep_for(20ms);
     }
 
-    car.sendCommand({0, 0});
+    car.sendCommand({0, 0, 0});
     std::this_thread::sleep_for(500ms);
     car.disconnect();
     return 0;

@@ -87,6 +87,21 @@ void PorscheGt4::setupHandshake() {
             raw[4] == HUB_PROP_OP_UPDATE) {
             _linkStatus.store({static_cast<int8_t>(raw[5]), getNowNs()});
         }
+        if (data.size() >= 8 && raw[2] == 0x45 && raw[3] == PORT_DRIVE_L) {
+            int32_t val;
+            std::memcpy(&val, &raw[4], sizeof(int32_t));
+            // Left channel command is sign-flipped for the mirrored mount (see
+            // buildDriveCmd); flip the encoder reading back so a positive-going
+            // count means "forward" on this wheel too, matching the right side.
+            auto prev = _driveEncoders.load();
+            _driveEncoders.store({-val, prev.right_ticks, getNowNs()});
+        }
+        if (data.size() >= 8 && raw[2] == 0x45 && raw[3] == PORT_DRIVE_R) {
+            int32_t val;
+            std::memcpy(&val, &raw[4], sizeof(int32_t));
+            auto prev = _driveEncoders.load();
+            _driveEncoders.store({prev.left_ticks, val, getNowNs()});
+        }
         if (data.size() >= 5 && raw[2] == 0x04 && raw[4] == 0x02) {
             _virtualDrivePort.store(raw[3]);
         }
@@ -103,6 +118,14 @@ void PorscheGt4::setupHandshake() {
     std::this_thread::sleep_for(150ms);
     porsche.write_command(SERVICE_UUID, CHAR_UUID,
                           {0x05, 0x00, 0x01, HUB_PROP_RSSI, HUB_PROP_OP_ENABLE_UPDATES});
+    std::this_thread::sleep_for(150ms);
+    // Mode 2 = cumulative rotation counter (POS) on each drive motor's own
+    // built-in encoder, confirmed by live probing.
+    porsche.write_command(SERVICE_UUID, CHAR_UUID,
+                          {0x0A, 0x00, 0x41, PORT_DRIVE_L, 0x02, 0x01, 0x00, 0x00, 0x00, 0x01});
+    std::this_thread::sleep_for(150ms);
+    porsche.write_command(SERVICE_UUID, CHAR_UUID,
+                          {0x0A, 0x00, 0x41, PORT_DRIVE_R, 0x02, 0x01, 0x00, 0x00, 0x00, 0x01});
     std::this_thread::sleep_for(150ms);
     porsche.write_command(SERVICE_UUID, CHAR_UUID, {0x06, 0x00, 0x61, 0x01, 0x32, 0x33});
     for (int i = 0; i < 20 && _virtualDrivePort.load() == 0xFF; ++i)
@@ -130,7 +153,10 @@ void PorscheGt4::txLoop(std::stop_token st) {
         if (!_isCalibrated.load() || _virtualDrivePort.load() == 0xFF) continue;
 
         try {
-            porsche.write_command(SERVICE_UUID, CHAR_UUID, buildDriveCmd(target.throttle));
+            porsche.write_command(
+                SERVICE_UUID, CHAR_UUID,
+                buildDriveCmd(static_cast<int8_t>(target.throttle_left),
+                             static_cast<int8_t>(target.throttle_right)));
             porsche.write_command(SERVICE_UUID, CHAR_UUID,
                                   buildSteerCmd(hardwareCenter + target.steer));
 
@@ -188,15 +214,15 @@ LatencyStats PorscheGt4::getLatencyStats() {
             sorted[static_cast<size_t>(sorted.size() * 0.99f)]};
 }
 
-SimpleBLE::ByteArray PorscheGt4::buildDriveCmd(int8_t speed) {
+SimpleBLE::ByteArray PorscheGt4::buildDriveCmd(int8_t left, int8_t right) {
     // Subcommand 0x02: Start Speed for virtual port (Speed1, Speed2, MaxPower).
     // PORT_DRIVE_L (0x32) is mounted mirror-image to PORT_DRIVE_R (0x33), so
-    // Speed1 (left) must be negated for both wheels to drive in the same direction.
-    int8_t inv = static_cast<int8_t>(-speed);
+    // Speed1 (left) must be negated for positive `left` to mean "forward".
+    int8_t inv = static_cast<int8_t>(-left);
     std::array<uint8_t, 9> buf = {0x09, 0x00, 0x81, _virtualDrivePort.load(),
                                    0x11, 0x02,
                                    static_cast<uint8_t>(inv),    // Speed1 — left motor
-                                   static_cast<uint8_t>(speed),  // Speed2 — right motor
+                                   static_cast<uint8_t>(right),  // Speed2 — right motor
                                    100};                          // MaxPower
     return SimpleBLE::ByteArray(reinterpret_cast<const char*>(buf.data()), 9);
 }
@@ -255,6 +281,9 @@ ImuSample PorscheGt4::getGyro() const noexcept {
 }
 LinkStatus PorscheGt4::getLinkStatus() const noexcept {
     return _linkStatus.load();
+}
+DriveEncoders PorscheGt4::getDriveEncoders() const noexcept {
+    return _driveEncoders.load();
 }
 bool PorscheGt4::isReady() const noexcept {
     return _isCalibrated.load() && _virtualDrivePort.load() != 0xFF;

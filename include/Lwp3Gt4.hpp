@@ -25,10 +25,16 @@ using TimestampNs = uint64_t;
 
 /**
  * @brief Represents a single control frame sent to the vehicle.
+ * Positive throttle always means "that wheel spins forward", independent of
+ * left/right mounting — the HAL corrects for the mirrored motor mounting
+ * internally. Set throttle_left == throttle_right to drive straight, as
+ * before; independent values enable differential drive (skid-turning,
+ * traction/slip response, etc.) in the application layer.
  */
 struct Command {
-    int32_t steer;     ///< Steering angle in degrees (-100 to 100)
-    int32_t throttle;  ///< Motor power percentage (-100 to 100)
+    int32_t steer;           ///< Steering angle in degrees (-100 to 100)
+    int32_t throttle_left;   ///< Left wheel motor power percentage (-100 to 100)
+    int32_t throttle_right;  ///< Right wheel motor power percentage (-100 to 100)
 };
 
 /**
@@ -57,6 +63,20 @@ struct ImuSample {
 struct LinkStatus {
     int8_t rssi_dbm;           ///< Received Signal Strength Indicator, in dBm (negative).
     TimestampNs timestamp_ns;  ///< Monotonic timestamp of ingestion.
+};
+
+/**
+ * @brief Cumulative rotation counters from each drive motor's built-in encoder.
+ * Raw tick counts (mode 2 / POS on each drive motor port), sign-corrected so
+ * that a positive-going count matches "forward" on that wheel, consistent
+ * with Command::throttle_left/throttle_right. No distance/velocity scaling
+ * is applied — that mapping (ticks per revolution, wheel circumference)
+ * belongs in the application layer.
+ */
+struct DriveEncoders {
+    int32_t left_ticks;
+    int32_t right_ticks;
+    TimestampNs timestamp_ns;  ///< Monotonic timestamp of ingestion (most recent of the two).
 };
 
 /**
@@ -130,6 +150,11 @@ class PorscheGt4 {
     LinkStatus getLinkStatus() const noexcept;
 
     /**
+     * @brief Retrieves the latest cumulative encoder ticks from both drive motors.
+     */
+    DriveEncoders getDriveEncoders() const noexcept;
+
+    /**
      * @brief Calculates real-time latency statistics using Epsilon-Matching.
      * This provides a model of physical system response, not just transport time.
      * @return Statistical report of system lag.
@@ -152,12 +177,13 @@ class PorscheGt4 {
     std::mutex _txMtx;
 
     // Control State (Atomic Latest Semantics)
-    std::atomic<Command> _latestCmd{Command{0, 0}};
+    std::atomic<Command> _latestCmd{Command{0, 0, 0}};
     std::atomic<bool> _hasNewCmd{false};
     std::atomic<Telemetry> _telemetryLatch{Telemetry{}};
     std::atomic<ImuSample> _accelLatch{ImuSample{}};
     std::atomic<ImuSample> _gyroLatch{ImuSample{}};
     std::atomic<LinkStatus> _linkStatus{LinkStatus{}};
+    std::atomic<DriveEncoders> _driveEncoders{DriveEncoders{}};
 
     // Internal Telemetry State
     std::atomic<int32_t> _rawSteerPos{0};
@@ -190,7 +216,7 @@ class PorscheGt4 {
 
     // Packet Builders
     SimpleBLE::ByteArray buildSteerCmd(int32_t abs_angle);
-    SimpleBLE::ByteArray buildDriveCmd(int8_t speed);
+    SimpleBLE::ByteArray buildDriveCmd(int8_t left, int8_t right);
 
     /** @brief Moves the steering rack until a physical stall is detected. */
     int32_t sweep_to_limit(int8_t speed);

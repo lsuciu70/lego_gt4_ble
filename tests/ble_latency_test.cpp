@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 20; ++i) {
         // Use a slightly smaller target than the max to avoid hitting soft-margins
         int target = (i % 2 == 0) ? 35 : -35;
-        car.sendCommand({target, 0});
+        car.sendCommand({target, 0, 0});
 
         // SAFETY: We wait for the car to get CLOSE, then move on.
         // If we wait for perfection, D-Bus will time out.

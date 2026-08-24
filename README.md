@@ -167,6 +167,27 @@ the BLE connection actually drops.
 
 ---
 
+## Drive Encoders
+
+Both drive motors have their own built-in rotation encoder:
+
+```cpp
+struct DriveEncoders {
+    int32_t left_ticks;
+    int32_t right_ticks;
+    TimestampNs timestamp_ns;
+};
+```
+
+Cumulative raw tick counts, sign-corrected so a positive-going count means
+"forward" on that wheel (matching `Command::throttle_left/right`). No
+ticks-per-revolution or wheel-circumference scaling is applied — that
+belongs in the application layer. Verified on hardware for symmetric
+(straight-line) driving; see the Command section above for the differential
+caveat.
+
+---
+
 ## Latency Profiling
 
 The SDK measures physical steering response.
@@ -202,14 +223,28 @@ struct LatencyStats {
 ```cpp
 struct Command {
     int32_t steer;
-    int32_t throttle;
+    int32_t throttle_left;
+    int32_t throttle_right;
 };
 ```
 
 Ranges:
 
 - steer: approximately -100 to +100
-- throttle: -100 to +100
+- throttle_left / throttle_right: -100 to +100
+
+Positive throttle always means "that wheel spins forward" — the HAL
+corrects for the mirrored motor mounting internally. Set
+`throttle_left == throttle_right` to drive straight.
+
+**Known limitation:** symmetric driving (`throttle_left == throttle_right`)
+is verified working end-to-end, including drive-encoder feedback.
+Genuinely differential values (opposite signs, e.g. for an in-place skid
+turn) are accepted by the API and protocol, but on-hardware testing showed
+**no wheel movement** in that case — the drive motors' virtual port may
+have a firmware-level constraint limiting it to symmetric/mirrored motion.
+Not yet root-caused; treat differential throttle as unverified until this
+is investigated further (see client_handout_ble.md, section 9a).
 
 ---
 
@@ -271,13 +306,14 @@ Thread-safe and non-blocking.
 Example:
 
 ```cpp
-car.sendCommand({25, 40});
+car.sendCommand({25, 40, 40});
 ```
 
 Meaning:
 
 - steering = 25
-- throttle = 40
+- throttle_left = 40
+- throttle_right = 40
 
 ---
 
@@ -333,6 +369,24 @@ Example:
 auto link = car.getLinkStatus();
 
 std::cout << (int)link.rssi_dbm << " dBm" << std::endl;
+```
+
+---
+
+## getDriveEncoders()
+
+```cpp
+DriveEncoders getDriveEncoders() const;
+```
+
+Returns the latest cumulative encoder ticks from both drive motors.
+
+Example:
+
+```cpp
+auto enc = car.getDriveEncoders();
+
+std::cout << enc.left_ticks << " " << enc.right_ticks << std::endl;
 ```
 
 ---
@@ -400,11 +454,11 @@ int main() {
     }
 
     for (int i = 0; i < 250; ++i) {
-        car.sendCommand({0, 30});
+        car.sendCommand({0, 30, 30});
         std::this_thread::sleep_for(20ms);
     }
 
-    car.sendCommand({0, 0});
+    car.sendCommand({0, 0, 0});
 
     car.disconnect();
 

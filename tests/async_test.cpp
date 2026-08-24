@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
         float t_sec = i * 0.02f;
         int target_steer = static_cast<int>(50.0f * std::sin(t_sec * 3.0f));
 
-        car.sendCommand({target_steer, 30});
+        car.sendCommand({target_steer, 30, 30});
 
         if (i % 50 == 0) {
             auto stats = car.getLatencyStats();
@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_until(next_tick);
     }
 
-    car.sendCommand({0, 0});
+    car.sendCommand({0, 0, 0});
     std::this_thread::sleep_for(500ms);
     car.disconnect();
     return 0;
