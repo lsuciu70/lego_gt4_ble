@@ -303,31 +303,17 @@ edited in one place.
 
 # Public API
 
-## Command
-
-```cpp
-struct Command {
-    int32_t steer;
-    int32_t throttle_left;
-    int32_t throttle_right;
-};
-```
-
-Ranges:
-
-- steer: approximately -100 to +100
-- throttle_left / throttle_right: -100 to +100
-
-Positive throttle always means "that wheel spins forward" — the HAL
-corrects for the mirrored motor mounting internally. Set
-`throttle_left == throttle_right` to drive straight.
+The full interface specification — every method's signature, behavior,
+guarantees, units, and the common integration mistakes — lives in
+`client_handout_ble.md`, not here, to avoid keeping two references in
+sync. This section covers only the drive architecture's design rationale,
+since that history explains *why* the API looks the way it does.
 
 For symmetric commands (`throttle_left == throttle_right`), the HAL sends
 one atomic packet through the LWP3 virtual/combined port. For differential
 commands, it sends two direct per-motor writes, always together even if
-only one side changed — see "Drive Architecture" below. Verified on
-hardware for both cases, including an in-place skid turn confirmed via
-drive-encoder feedback.
+only one side changed. Verified on hardware for both cases, including an
+in-place skid turn confirmed via drive-encoder feedback.
 
 ---
 
@@ -395,258 +381,13 @@ together on the differential path.
 
 ---
 
-## connect()
-
-```cpp
-bool connect(std::string_view address);
-```
-
-Connects to the LEGO Move Hub and performs protocol initialization.
-
-Returns:
-
-- true on success
-- false on failure
-
----
-
-## disconnect()
-
-```cpp
-void disconnect();
-```
-
-Stops background processing and disconnects from the hub.
-
-Also clears calibration state (hardware center, virtual drive port,
-telemetry). A subsequent `connect()` always requires a fresh
-`autoCalibrate()` before `isReady()` becomes true again, even when
-reconnecting to the same vehicle.
-
-Idempotent — a second call (e.g. the destructor calling it again after the
-application already called it explicitly) is a cheap no-op.
-
-Internally, stopping the TX thread waits up to 3s for it to exit cleanly;
-if it doesn't (an in-flight `write_command()` stuck on a bad D-Bus/BlueZ
-call), the thread is detached rather than hanging `disconnect()` forever.
-This is a different issue from the slow *process exit* after a clean
-`disconnect()` — see "Known Issue: Slow Process Exit" above.
-
----
-
-## autoCalibrate()
-
-```cpp
-bool autoCalibrate();
-```
-
-Performs steering calibration.
-
-This must be called before vehicle operation.
-
-Returns:
-
-- true on success
-- false on failure
-
----
-
-## sendCommand()
-
-```cpp
-void sendCommand(const Command& cmd);
-```
-
-Thread-safe and non-blocking.
-
-Example:
-
-```cpp
-car.sendCommand({25, 40, 40});
-```
-
-Meaning:
-
-- steering = 25
-- throttle_left = 40
-- throttle_right = 40
-
----
-
-## getLatestTelemetry()
-
-```cpp
-Telemetry getLatestTelemetry() const;
-```
-
-Returns the latest steering telemetry.
-
-Example:
-
-```cpp
-auto t = car.getLatestTelemetry();
-
-std::cout << t.steer_pos << std::endl;
-```
-
----
-
-## enableImu()
-
-```cpp
-bool enableImu();
-```
-
-Subscribes to the hub's accelerometer/gyroscope. Not called automatically
-by `connect()` — see "IMU" above for why. Call after `connect()`, before
-relying on `getAccel()`/`getGyro()`.
-
-**Not confirmed safe during active driving** — see "IMU" above; a
-combined driving + IMU test stalled the connection silently even with the
-reduced notification rate this call requests.
-
-Returns:
-
-- true if the subscription requests were sent successfully
-- false on failure
-
----
-
-## getAccel() / getGyro()
-
-```cpp
-ImuSample getAccel() const;
-ImuSample getGyro() const;
-```
-
-Return the latest raw sample from the hub's internal accelerometer /
-gyroscope. Only updates after a successful `enableImu()` call.
-
-Example:
-
-```cpp
-auto a = car.getAccel();
-
-std::cout << a.x << " " << a.y << " " << a.z << std::endl;
-```
-
----
-
-## enableLinkStatus()
-
-```cpp
-bool enableLinkStatus();
-```
-
-Subscribes to the hub's RSSI property. Not called automatically by
-`connect()` — see "Link Status (RSSI)" above. Call after `connect()`,
-before relying on `getLinkStatus()`.
-
-Returns:
-
-- true if the subscription request was sent successfully
-- false on failure
-
----
-
-## getLinkStatus()
-
-```cpp
-LinkStatus getLinkStatus() const;
-```
-
-Returns the latest BLE RSSI reported by the hub. Only updates after a
-successful `enableLinkStatus()` call.
-
-Example:
-
-```cpp
-auto link = car.getLinkStatus();
-
-std::cout << (int)link.rssi_dbm << " dBm" << std::endl;
-```
-
----
-
-## enableDriveEncoders()
-
-```cpp
-bool enableDriveEncoders();
-```
-
-Subscribes to both drive motors' built-in rotation encoders. Not called
-automatically by `connect()` — see "Drive Encoders" above. Call after
-`connect()`, before relying on `getDriveEncoders()`.
-
-Returns:
-
-- true if the subscription requests were sent successfully
-- false on failure
-
----
-
-## getDriveEncoders()
-
-```cpp
-DriveEncoders getDriveEncoders() const;
-```
-
-Returns the latest cumulative encoder ticks from both drive motors. Only
-updates after a successful `enableDriveEncoders()` call.
-
-Example:
-
-```cpp
-auto enc = car.getDriveEncoders();
-
-std::cout << enc.left_ticks << " " << enc.right_ticks << std::endl;
-```
-
----
-
-## getLatencyStats()
-
-```cpp
-LatencyStats getLatencyStats();
-```
-
-Returns accumulated latency statistics.
-
-Example:
-
-```cpp
-auto stats = car.getLatencyStats();
-
-std::cout << stats.mean_ms << std::endl;
-```
-
----
-
-## isReady()
-
-```cpp
-bool isReady() const;
-```
-
-Returns true when the vehicle is ready for operation.
-
-Requirements:
-
-- successful BLE connection
-- successful initialization
-- successful calibration
-
-Becomes false again after `disconnect()`, and stays false after a
-reconnect until `autoCalibrate()` succeeds on the new connection.
-
----
-
 # Quick Start
 
 ```cpp
 #include "Lwp3Gt4.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 
 using namespace std::chrono_literals;
@@ -674,8 +415,7 @@ int main() {
     car.sendCommand({0, 0, 0});
 
     car.disconnect();
-
-    return 0;
+    std::_Exit(0);  // not `return 0` — see "Known Issue: Slow Process Exit" below
 }
 ```
 

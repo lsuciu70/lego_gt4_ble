@@ -6,7 +6,9 @@ Audience:
 Software engineers integrating the Porsche GT4 BLE SDK into robotics,
 ADAS, autonomy, or control applications.
 
-This document is the operational contract between the SDK and the client.
+This document is the interface specification: current behavior and
+guarantees only. For implementation history and design rationale, see
+`README.md` and the git log.
 
 ---
 
@@ -240,53 +242,37 @@ including reconnects, before relying on `isReady()`.
 This is intentional: the physical rig or the hub may have changed between
 sessions, so a stale calibration must never be reused silently.
 
-`disconnect()` is idempotent — calling it twice (e.g. explicitly, then
-again from `~PorscheGt4()`) is a cheap no-op the second time, not a
-repeated slow teardown.
+`disconnect()` is idempotent — a second call (e.g. from `~PorscheGt4()`
+after an explicit call) is a cheap no-op, not a repeated slow teardown.
 
-Internally, `disconnect()` stops the TX thread with a bounded (3s) wait
-rather than an unconditional `join()`: an in-flight `write_command()` can
-block indefinitely on a stuck D-Bus/BlueZ call (observed on hardware), and
-without a timeout that would hang `disconnect()` itself forever. If the
-thread doesn't exit in time, it's detached (via `std::jthread::detach()`,
-not a raw `pthread_detach`, so the jthread object's own bookkeeping stays
-consistent) and abandoned rather than blocking. The detached thread keeps
-running and could still touch `this`/`porsche` if it ever unblocks — an
-accepted residual risk given the alternative is an indefinite hang. This
-is a genuinely rare path (only hit once, under already-degraded BlueZ
-conditions, during this SDK's testing); the far more common slow-exit
-issue is covered next.
+`disconnect()` always returns in bounded time (a few seconds at most),
+even if the connection is in a bad state — it never hangs indefinitely.
+See `README.md` if you need the internal mechanism.
 
 ---
 
 # 8b. Known Issue: Slow Process Exit
 
-`disconnect()` itself returns in a few seconds at most (`porsche.disconnect()`
-alone measured at ~2-3s on this hardware — BlueZ/D-Bus overhead, not
-something this HAL adds). But letting the process exit normally
-afterward — falling off the end of `main()`, so `PorscheGt4`'s destructor
-and the C++ runtime's static teardown both run — was measured to add
-**25+ seconds** on top of that, with no further activity. Every step
-inside `disconnect()` was individually timestamped to confirm this: all of
-it completes in a few seconds, well before the hang starts. The remaining
-delay is almost certainly a SimpleBLE-internal background thread not
-being torn down cleanly at process exit — outside this HAL's control.
+`disconnect()` itself returns in a few seconds at most. But letting the
+*process* exit normally afterward (falling off the end of `main()`, so
+`PorscheGt4`'s destructor and the C++ runtime's static teardown both run)
+was measured to add **25+ seconds** on top of that — a SimpleBLE-internal
+delay on process exit, outside this SDK's control. See `README.md` for
+the investigation.
 
 **Workaround, used in every example/test in this repo:**
 
 ```cpp
 car.disconnect();
-std::_Exit(0);   // instead of `return 0;` — see explanation below
+std::_Exit(0);   // instead of `return 0;`
 ```
 
 `std::_Exit(0)` (from `<cstdlib>`) terminates the process immediately,
-skipping local destructors and the C++ runtime's static teardown
-entirely. This is safe here because `disconnect()` has already released
-everything that matters (TX thread, BLE connection) — there is nothing
-meaningful left to clean up. Clients embedding this SDK in a longer-lived
-application (not a short test/example process) should be aware that a
-clean shutdown may take significantly longer than `disconnect()` itself
-suggests, if they don't use this workaround.
+skipping local destructors and static teardown. Safe here because
+`disconnect()` has already released everything that matters (TX thread,
+BLE connection). Clients embedding this SDK in a longer-lived application
+should be aware that a clean shutdown may take significantly longer than
+`disconnect()` itself suggests, if they don't use this workaround.
 
 ---
 
@@ -307,44 +293,37 @@ struct Command
 
 ## Steering
 
-Range:
+Range: `-100 ... +100` (`-100` = full left, `0` = center, `+100` = full
+right).
 
-```text
--100 ... +100
-```
+This is an abstract unit relative to the hardware center found by
+`autoCalibrate()`, NOT a physical degree measurement — the SDK never
+calibrates raw hub position units against real-world steering-rack
+degrees. Do not build geometry (e.g. Ackermann steering) assuming `steer`
+is in degrees.
 
-Interpretation:
-
-```text
--100 = full left
-   0 = center
-+100 = full right
-```
-
-Values outside this range should be considered invalid.
+**The SDK does not clamp or validate this value.** A `steer` value outside
+`-100...+100` (or any value, really — the field only tracks the
+*calibrated* range as `-100...+100`) is sent to the hub as-is: `hardwareCenter
++ steer`, an absolute position target. Commanding a position beyond the
+mechanical limit drives the steering motor continuously against its hard
+stop under closed-loop position control, which can strain the gear train.
+Clamping input to `-100...+100` is the client's responsibility.
 
 ---
 
 ## Throttle (throttle_left / throttle_right)
 
-Range:
-
-```text
--100 ... +100
-```
-
-Interpretation, per wheel:
-
-```text
--100 = maximum reverse
-   0 = stop
-+100 = maximum forward
-```
+Range: `-100 ... +100` per wheel (`-100` = maximum reverse, `0` = stop,
+`+100` = maximum forward).
 
 The SDK corrects for the mirrored motor mounting internally, so positive
-always means "forward" on both sides.
+always means "forward" on both sides. For straight-line driving, set
+`throttle_left == throttle_right`.
 
-For straight-line driving, set `throttle_left == throttle_right`.
+**The SDK does not clamp or validate this value either** — it is cast to
+`int8_t` and sent directly as a motor power command. Clamping input to
+`-100...+100` is the client's responsibility.
 
 ---
 
@@ -357,46 +336,17 @@ per physical motor port), always both together even if only one side
 changed. Commands are transmitted on change plus a low-rate keepalive —
 see section 12 — not retransmitted at a fixed high frequency.
 
-## History: two real problems that looked like one
+Two independent hardware issues were found and fixed during development —
+a fixed ~50Hz retransmit rate, and IMU notification volume — both of
+which produced the same symptom ("BLE connection drops during driving").
+Full investigation and the two corrected conclusions from that process are
+in `README.md`; current behavior only, below:
 
-Development went through several iterations misdiagnosing what turned out
-to be two independent problems, both producing the same external symptom
-("BLE connection drops during driving"). Recorded here so the same ground
-isn't re-covered:
-
-**Problem 1 — outgoing write rate.** Retransmitting a drive command at a
-fixed ~50 Hz (the SDK's originally documented control-loop rate)
-reliably dropped the BLE connection within 1-2 seconds on this hardware,
-regardless of whether the command value was actually changing. A command
-sent once and never repeated, or repeated at ~1 Hz, was reliable across
-many repeated hardware tests (15-32s each, including differential
-commands and alternating between the virtual port and direct writes
-mid-session). Fix: send-on-change + ~1Hz keepalive (section 12). The safe
-ceiling for a command that changes faster than ~1 Hz has NOT been
-characterized.
-
-**Problem 2 — incoming IMU notification volume**, found independently,
-after problem 1 was already fixed and driving still occasionally
-destabilized. Accelerometer/gyroscope notifications stream at up to
-~95 Hz / ~56 Hz while the vehicle is actually moving (mechanical
-vibration) — traffic *from* the hub, unrelated to anything the client
-sends. This alone was enough to drop the connection during real driving,
-even with problem 1 fixed and every other subscription (steering, both
-drive encoders) left enabled. Mitigation: IMU is opt-in (`enableImu()`,
-section 14a), not subscribed by `connect()`, and requests a coarser
-delta interval than the default. **This is not a confirmed fix** — see
-section 14a: a combined drive+IMU test still stalled the connection even
-with the mitigation in place. Treat IMU as unsafe during active driving.
-
-**What this means for two earlier conclusions in this document's history,
-now corrected:** With only problem 1 fixed (not yet problem 2), testing
-looked exactly like "the virtual port is unsafe to mix with direct
-writes" — switching between them appeared to leave the hub unresponsive.
-That conclusion did not hold up once problem 2 was also fixed and
-retested: alternating between the virtual port and direct writes
-repeatedly, mid-session, has been reliable. If you see connection drops
-during driving again, suspect problem 1 or 2 recurring (or a third,
-undiscovered cause) before suspecting the virtual/direct split itself.
+- Safe: send-on-change TX + ~1Hz keepalive (section 12). The ceiling for a
+  command that changes faster than ~1Hz has NOT been characterized.
+- Not safe during active driving: IMU (`enableImu()`, section 14a) — see
+  that section for current status.
+- Safe alongside driving, measured: steering, drive encoders, RSSI.
 
 ## Why direct writes are still used for differential commands
 
@@ -607,27 +557,19 @@ automatically by `connect()`.** Call this explicitly, after `connect()`,
 only if the application genuinely needs IMU data.
 
 Why opt-in, not automatic: accelerometer/gyroscope notifications stream at
-up to ~95 Hz / ~56 Hz (delta interval = 1) while the vehicle is actually
-moving (mechanical vibration causes constant value changes). That
-notification volume alone was found to destabilize the BLE connection
-during real driving — see section 9a, "Problem 2". Steering telemetry
-(the only subscription `connect()` sets up unconditionally) did not cause
-this even at ~132 Hz measured. Enabling IMU is a deliberate trade-off the
-client opts into, not a free capability.
+up to ~95 Hz / ~56 Hz while the vehicle is actually moving (mechanical
+vibration), and that notification volume alone was found to destabilize
+the BLE connection during real driving. Enabling IMU is a deliberate
+trade-off the client opts into, not a free capability.
 
-**Mitigation status — NOT a confirmed fix.** `enableImu()` requests a
-coarser delta interval (10 instead of 1), which cut the notification rate
-to ~16 Hz / ~5 Hz in an isolated, non-driving hand-rotation test. A
-follow-up test that combined active driving (hybrid virtual/direct TX,
-send-on-change — section 9a) with IMU enabled at this same delta still
-stalled the connection partway through, silently: no exception raised,
-telemetry and encoders simply stopped updating. Root cause not identified
-— possibly the combined weight of ~5-6 simultaneous subscriptions
-(steering, accel, gyro, both drive encoders, RSSI) rather than IMU rate
-in isolation. **Do not treat `enableImu()` as safe during active
-driving.** It is more likely to be safe for passive monitoring (vehicle
-stationary, or between drive segments) based on what has actually been
-tested.
+**Not confirmed safe during active driving.** `enableImu()` requests a
+coarser delta interval than the default, which reduces but does not
+eliminate the notification volume. A combined drive+IMU test still lost
+the connection with this mitigation in place, silently (no exception —
+telemetry simply stopped updating); root cause undetermined. Treat IMU as
+unsafe during active driving. More likely safe for passive monitoring
+(vehicle stationary, or between drive segments), based on what has
+actually been tested. See `README.md` for the investigation.
 
 Returns:
 
@@ -946,6 +888,7 @@ The SDK does not guarantee:
 - obstacle avoidance
 - vehicle safety
 - that the vehicle can always be stopped in software
+- detection of a stalled/stopped telemetry stream
 
 The vehicle remains a physical system subject to mechanical and wireless limitations.
 
@@ -962,33 +905,58 @@ architecture — it will recur if the connection drops for any reason,
 known or not. Clients must always be able to cut power to the hub by hand
 and must not rely on software-only stop as the sole safety mechanism.
 
+On the stalled-telemetry point: a BLE notification stream can stop
+silently — no exception, the getter just keeps returning the last value
+it ever received (the IMU case in section 14a is a confirmed example, but
+any subscription could in principle do this). The SDK does not detect or
+report this for you. Every telemetry struct (`Telemetry`, `ImuSample`,
+`LinkStatus`, `DriveEncoders`) carries `timestamp_ns` for exactly this
+reason — a control loop that depends on a given stream should check that
+its timestamp is still advancing, and treat a stream that hasn't updated
+in longer than expected as data loss (stop the vehicle, or fail over),
+not as "value unchanged."
+
 ---
 
 # 21. Recommended Control Loop
 
 ```cpp
-while (running)
-{
+LWP3::PorscheGt4 car;
+if (!car.connect(address)) return 1;
+if (!car.autoCalibrate() || !car.isReady()) return 1;
+
+// Opt-in telemetry, only what this controller actually needs — see
+// sections 14/14a. IMU is NOT recommended here; see section 14a.
+car.enableDriveEncoders();
+car.enableLinkStatus();
+
+while (running) {
     auto telemetry = car.getLatestTelemetry();
-
     auto cmd = controller.compute(telemetry);
-
     car.sendCommand(cmd);
-
-    sleep(20ms);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
 }
+
+car.sendCommand({0, 0, 0});
+std::this_thread::sleep_for(std::chrono::milliseconds(500));
+car.disconnect();
+std::_Exit(0);  // see section 8b — not `return 0`
 ```
 
-Recommended frequency:
+Recommended call frequency for `sendCommand()`: 50 Hz. Calling it that
+often is expected and fine even though the HAL does not transmit at 50 Hz
+internally — see section 12. The actual BLE write rate is decided by the
+HAL (send-on-change + ~1Hz keepalive), not by how often the client calls
+`sendCommand()`.
 
-```text
-50 Hz
-```
-
-Calling `sendCommand()` at 50 Hz is expected and fine even though the HAL
-does not transmit at 50 Hz internally — see section 12. The actual BLE
-write rate is decided by the HAL (send-on-change + ~1Hz keepalive), not by
-how often the client calls `sendCommand()`.
+**Caveat that matters for this exact loop:** section 12's "safe ceiling
+not characterized" applies here directly. If `controller.compute()`
+produces a genuinely different `cmd` on every tick (e.g. continuous
+closed-loop steering correction, not just periodic re-sends of an
+unchanged value), that drives BLE writes faster than the ~1Hz pattern
+that has actually been validated on hardware. Test that specific
+behavior — a continuously-changing command, not a periodically-resent
+one — before relying on it in this loop.
 
 ---
 

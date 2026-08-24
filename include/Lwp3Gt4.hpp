@@ -34,9 +34,19 @@ using TimestampNs = uint64_t;
  * traction/slip response, etc.) in the application layer.
  */
 struct Command {
-    int32_t steer;           ///< Steering angle in degrees (-100 to 100)
-    int32_t throttle_left;   ///< Left wheel motor power percentage (-100 to 100)
-    int32_t throttle_right;  ///< Right wheel motor power percentage (-100 to 100)
+    /// Steering position, -100 (full left) to 100 (full right), relative
+    /// to the center found by autoCalibrate(). An abstract unit, NOT
+    /// physical degrees — never calibrated against real-world rack angle.
+    /// Not clamped by the SDK: values outside -100..100 are sent as-is,
+    /// which can drive the steering motor continuously against its
+    /// mechanical stop. Clamping is the caller's responsibility.
+    int32_t steer;
+    /// Left wheel motor power, -100 (max reverse) to 100 (max forward).
+    /// Not clamped by the SDK; see `steer` above.
+    int32_t throttle_left;
+    /// Right wheel motor power, -100 (max reverse) to 100 (max forward).
+    /// Not clamped by the SDK; see `steer` above.
+    int32_t throttle_right;
 };
 
 /**
